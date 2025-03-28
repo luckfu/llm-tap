@@ -1,0 +1,20 @@
+{
+    "proxy_config": {
+        "auth_tokens": [
+            "sk-bmutyiebgsnrujeozzmwjbawwuxodmxfazethbdvfkturovv",
+            "sk-abc123def456ghi789jkl012mno345pq"
+        ]
+    },
+    "models": {
+        "111": {
+            "model": "Pro/deepseek-ai/DeepSeek-R1",
+            "key": "sk-bmutyiebgsnrujeozzmwjbawwuxodmxfazethbdvfkturovv",
+            "end_point": "http://api.siliconflow.cn/v1/chat/completions"
+        },
+        "222": {
+            "model": "DeepSeek-R1",
+            "key": "sk-abc123def456ghi789jkl012mno345pq",
+            "end_point": "http://36.141.21.137:9081/v1/chat/completions"
+        }
+    }
+}
