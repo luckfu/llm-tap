@@ -155,30 +155,81 @@ def format_to_sharegpt(model: str, messages: dict, response: str) -> dict:
         if role == "user":
             content = msg.get("content", "")
             if content:
+                # Ensure content is a string before stripping
+                if not isinstance(content, str):
+                    content_str = json.dumps(content, ensure_ascii=False)
+                else:
+                    content_str = content
+                
                 conversations.append({
                     "from": "human",
-                    "value": content.strip()
+                    "value": content_str.strip()
                 })
         elif role == "assistant":
+            # 先处理 assistant 的文本内容（如果有）
+            content = msg.get("content")
+            if content:
+                 # Ensure content is a string before stripping
+                if not isinstance(content, str):
+                    content_str = json.dumps(content, ensure_ascii=False)
+                else:
+                    content_str = content
+                conversations.append({
+                    "from": "gpt",
+                    "value": content_str.strip()
+                })
+            # 再处理 tool_calls（如果有）
             if "tool_calls" in msg:
                 for tool_call in msg["tool_calls"]:
+                    # 提取 function details
+                    function_details = tool_call.get("function", {})
+                    function_name = function_details.get("name", "")
+                    function_args = function_details.get("arguments", "{}") # Default to empty JSON string
+                    
+                    # Ensure arguments are valid JSON string before parsing
+                    try:
+                        # Attempt to parse arguments to ensure they are valid JSON
+                        json.loads(function_args)
+                    except json.JSONDecodeError:
+                        # If arguments are not valid JSON, represent them as a string
+                        function_args_str = str(function_args)
+                        # Log a warning or handle as appropriate
+                        # For now, we'll just use the string representation
+                        pass # Keep function_args as is if already string
+                    except TypeError:
+                         # Handle cases where arguments might not be string-like (e.g., None)
+                        function_args = json.dumps(function_args) # Convert to JSON string
+
                     conversations.append({
                         "from": "function_call",
                         "value": json.dumps({
-                            "id": tool_call.get("id", ""),
+                            "id": tool_call.get("id", ""), # Include tool_call_id
                             "function": {
-                                "name": tool_call["function"]["name"],
-                                "arguments": tool_call["function"]["arguments"]
+                                "name": function_name,
+                                "arguments": function_args
                             },
-                            "type": tool_call["type"]
+                            "type": tool_call.get("type", "function") # Include type if available
                         }, ensure_ascii=False)
                     })
         elif role == "tool":
             content = msg.get("content", "")
             if content:
+                # Check if content is a list, convert to string if necessary
+                if isinstance(content, list):
+                    content_str = json.dumps(content, ensure_ascii=False)
+                else:
+                    # Ensure content is treated as a string
+                    content_str = str(content)
+                # Ensure content is a string before stripping
+                if not isinstance(content_str, str):
+                    # If it became a list/dict dump again, just use the string representation
+                    content_str = str(content)
+                    
                 conversations.append({
                     "from": "observation",
-                    "value": content.strip()
+                    # Include tool_call_id if available in the original message
+                    "tool_call_id": msg.get("tool_call_id", ""), 
+                    "value": content_str.strip()
                 })
     
     # 添加助手回复（如果有）
