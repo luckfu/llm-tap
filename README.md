@@ -1,113 +1,224 @@
-# LLM代理服务器系统说明文档
+# collect_sft
 
-## 项目概述
-本项目包含三个独立的代理服务器程序，每个程序都针对不同的使用场景，为LLM（大语言模型）服务提供不同层次的代理功能。
+[English](README.md) | [中文](README_zh.md)
 
-## 组件说明
+LLM transparent proxy + data collection system.
 
-### 1. proxy_server.py
-> 类似 oneapi 代理 通过json配置，设定模型名称，base_url,api_key,auth_type等配置，然后转发到实际的模型服务。
-#### 功能特点
-- 提供统一的LLM模型代理服务
-- 支持自定义认证令牌验证
-- 支持模型ID到实际服务端点的映射
-- 支持流式和非流式响应
-- 自动保存对话记录到数据库
+Change the client's LLM request URL from `https://api.xxx.com` to `http://127.0.0.1:12345/api.xxx.com`, and the proxy transparently forwards requests/responses while saving each complete call as-is for downstream training data construction.
 
-#### 适用场景
-- 需要统一管理多个LLM服务接入点
-- 需要对不同模型进行访问控制
-- 需要统一收集和存储对话数据
+## How It Works
 
-#### 使用方法
-```bash
-python proxy_server.py -p 8080 -c config.json
 ```
-配置文件示例（config.json）：
+Client (Claude Code / Codex / CherryStudio / any OpenAI-compatible app)
+  │
+  │  URL: http://127.0.0.1:12345/api.xxx.com/v1/chat/completions
+  │  Key: real upstream API key (unchanged)
+  │
+  ▼
+┌─────────────────────────────────────────┐
+│         Transparent Proxy Server        │
+│                                         │
+│  1. Extract host from path: api.xxx.com │
+│  2. Rebuild URL: https://api.xxx.com/...│
+│  3. Forward auth headers as-is          │
+│  4. Detect protocol (chat/messages/...) │
+│  5. Stream + merge into full response   │
+│  6. Save complete call to JSON file     │
+└─────────────────────────────────────────┘
+  │
+  ▼
+Real LLM provider (SiliconFlow / DeepSeek / Zhipu / Anthropic / OpenAI / any)
+```
+
+## Features
+
+- **Zero upstream config** — host from path, key from headers, proxy holds no credentials
+- **Auto protocol detection** — from path suffix (`/v1/chat/completions` / `/v1/messages` / `/v1/responses`)
+- **Multi-provider support** — configure multiple providers in client, each with its own URL
+- **Stream merging** — merge SSE chunks into a complete response JSON (equivalent to non-streaming)
+- **Faithful storage** — one JSON file per call with request + response + metadata, no protocol conversion
+- **Organized by host** — data naturally categorized by provider
+
+## Quick Start
+
+### 1. Start the proxy
+
+```bash
+python3 proxy_oneapi.py -p 12345
+```
+
+### 2. Configure client
+
+Change the client's API URL from:
+```
+https://api.xxx.com/v1
+```
+to:
+```
+http://127.0.0.1:12345/api.xxx.com/v1
+```
+
+API key stays the same — use the real upstream key.
+
+### 3. Use normally
+
+The client works as usual. The proxy collects data in the background.
+
+## Client Configuration Examples
+
+### Claude Code (Anthropic protocol)
+
+```bash
+export ANTHROPIC_BASE_URL=http://127.0.0.1:12345/api.anthropic.com
+export ANTHROPIC_API_KEY=sk-ant-your-real-key
+claude
+```
+
+Using Zhipu's Anthropic-compatible endpoint:
+```bash
+export ANTHROPIC_BASE_URL=http://127.0.0.1:12345/open.bigmodel.cn/api/anthropic
+export ANTHROPIC_API_KEY=your-zhipu-key
+claude
+```
+
+### Codex CLI (OpenAI Responses protocol)
+
+`~/.codex/config.toml`:
+```toml
+[model_providers.OpenAI]
+name = "OpenAI"
+base_url = "http://127.0.0.1:12345/api.openai.com/v1"
+wire_api = "responses"
+requires_openai_auth = true
+```
+
+### CherryStudio / any OpenAI-compatible client
+
+```
+API URL: http://127.0.0.1:12345/api.siliconflow.cn/v1
+API Key: your real key
+```
+
+### Multi-provider scenario (hermes / openclaw etc.)
+
+Each provider gets its own URL:
+```
+Provider 1: http://127.0.0.1:12345/open.bigmodel.cn/api/coding/paas/v4
+Provider 2: http://127.0.0.1:12345/api.psydo.top/v1
+Provider 3: http://127.0.0.1:12345/api.deepseek.com/v1
+```
+
+Zero proxy config — routing is automatic by host.
+
+## Data Storage
+
+### File Structure
+
+```
+data/calls/
+├── api.anthropic.com/
+│   └── 2026/07/01/
+│       └── call-20260701120000-abc123.json
+├── open.bigmodel.cn/
+│   └── 2026/07/01/
+│       └── call-20260701130000-def456.json
+└── api.openai.com/
+    └── 2026/07/01/
+        └── call-20260701140000-ghi789.json
+```
+
+Organized by host + date. Each file is one complete call.
+
+### File Structure
+
 ```json
 {
-    "proxy_config": {
-        "auth_tokens": ["sk-your-token-1", "sk-your-token-2"]
-    },
-    "models": {
-        "111": {
-            "model": "Pro/deepseek-ai/DeepSeek-R1",
-            "key": "sk-actual-api-key",
-            "end_point": "http://api.siliconflow.cn/v1/chat/completions"
-        }
-    }
+  "meta": {
+    "call_id": "call-20260701120000-abc123",
+    "protocol": "anthropic-messages",
+    "upstream_provider": "api.anthropic.com",
+    "upstream_model": "claude-sonnet-4-20250514",
+    "started_at": "2026-07-01T12:00:00",
+    "finished_at": "2026-07-01T12:00:05",
+    "duration_ms": 5343,
+    "first_token_ms": 4672,
+    "upstream_status": 200,
+    "stop_reason": "end_turn",
+    "is_stream": true
+  },
+  "request": { ... },    // raw request body (protocol-native)
+  "response": { ... },   // merged full response (equivalent to non-streaming)
+  "headers": { ... }     // sanitized headers
 }
 ```
 
-### 2. proxy_endpoint.py
-> 主要取代 模型设置中的api地址，key，模型名称，需要你实际拥有的，它主要用于在各种app中，把api地址设置成代理地址后，可以正常调用
-#### 功能特点
-- 支持基于配置的端点转发
-- 支持流式和非流式响应处理
-- 提供健康检查接口
-- 支持请求重试机制
+**Request and response are in the same file.** No protocol conversion — each protocol's native structure is preserved.
 
-#### 适用场景
-- 需要对特定模型服务进行代理转发
-- 需要统一的错误处理和日志记录
-- 需要支持流式输出的场景
+### Protocol Fidelity
 
+| Protocol | Path Suffix | Response Structure |
+|----------|-------------|---------------------|
+| OpenAI Chat | `/v1/chat/completions` | `{choices:[{message, finish_reason}], usage}` |
+| Anthropic Messages | `/v1/messages` | `{content:[...], stop_reason, usage}` |
+| OpenAI Responses | `/v1/responses` | `{output:[...], status, usage}` |
 
-#### 使用方法
+Anthropic's `thinking` block (with `signature`), `tool_use` block, `tool_result` block — all preserved as-is.
+
+## Project Structure
+
+```
+collect_sft/
+├── proxy_oneapi.py    # Transparent proxy server
+├── raw_storage.py     # Faithful call storage
+├── stream_merger.py   # Stream response merging (OpenAI Chat / Anthropic Messages)
+└── utils.py           # Async logging + database init
+```
+
+## Launch Parameters
+
 ```bash
-python proxy_endpoint.py -p 8080 -c endpoint_config.json
-```
-配置文件示例（endpoint_config.json）：
-```json
-{
-    "endpoints": {
-        "provider1": {
-            "base_url": "http://api.example.com",
-            "chat_completion_path": "/v1/chat/completions",
-            "models": ["model1", "model2"],
-            "auth_type": "bearer"
-        }
-    }
-}
+python3 proxy_oneapi.py -p 12345 --log-level INFO
 ```
 
-### 3. proxy_gateway.py
-#### 功能特点
-- 支持对话数据的解析和存储
-- 支持流式响应的处理
-- 提供统一的数据格式转换
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `-p, --port` | 12345 | Listen port |
+| `--log-level` | INFO | Log level (DEBUG/INFO/WARNING/ERROR) |
 
-#### 适用场景
-- 需要收集和存储模型对话数据
-- 需要对响应数据进行格式转换
-- 需要支持流式输出的场景
-- 在app中设置代理，但是这种模式不支持https(很多模型服务商支持http)
+## Design Principles
 
-## 部署说明
+1. **Stream merging = reconstruct equivalent non-streaming response** — preserve protocol-native structure, no cross-protocol conversion
+2. **Failed calls not saved** — upstream non-200 only logged, not stored
+3. **GET requests pass-through** — model list and other GET requests not saved
+4. **Header sanitization** — `Authorization`, `x-api-key` etc. only retain length info
 
-### 环境要求
-- Python 3.7+
-- 依赖包：aiohttp, sqlite3
+## Web UI
 
-### 安装步骤
-1. 克隆代码库
-2. 安装依赖：`pip install -r requirements.txt`
-3. 配置相应的配置文件
-4. 运行所需的代理服务器
+Visit `http://127.0.0.1:12345/` in browser for a management interface with:
+- Call list with filtering (host, protocol, model, status)
+- Call detail viewer (full request/response JSON)
+- Statistics overview (by host, protocol, model)
+- Chinese/English language switch
 
-## 注意事项
-1. 请妥善保管API密钥和认证令牌
-2. 建议在生产环境中使用HTTPS
-3. 定期备份数据库文件
-4. 监控日志文件大小，适时归档
+## FAQ
 
-## 常见问题
-1. 如遇到连接超时，请检查网络连接和目标服务器状态
-2. 数据库报错时，确保有适当的写入权限
-3. 流式响应中断时，检查客户端连接状态
+### curl reports `Failed to connect to 127.0.0.1 port 7890`
 
-## 技术支持
-如有问题，请查看各程序生成的日志文件：
-- proxy_server.log
-- proxy_endpoint.log
-- proxy_gateway.log
+System HTTP proxy (Clash/V2Ray etc.) intercepts curl. Add `--noproxy '*'`:
+```bash
+curl --noproxy '*' http://127.0.0.1:12345/...
+```
+
+### Codex reports `stream disconnected before completion`
+
+Codex may be using the system proxy. Set before launching:
+```bash
+export NO_PROXY=127.0.0.1,localhost
+export no_proxy=127.0.0.1,localhost
+```
+
+### Port already in use
+
+```bash
+lsof -ti:12345 | xargs kill -9
+```
