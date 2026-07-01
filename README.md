@@ -104,7 +104,7 @@ API Key: your real key
 Each provider gets its own URL:
 ```
 Provider 1: http://127.0.0.1:12345/open.bigmodel.cn/api/coding/paas/v4
-Provider 2: http://127.0.0.1:12345/api.psydo.top/v1
+Provider 2: http://127.0.0.1:12345/api.openai.com/v1
 Provider 3: http://127.0.0.1:12345/api.deepseek.com/v1
 ```
 

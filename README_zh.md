@@ -104,7 +104,7 @@ API Key:  你的真实 key
 各服务商各配各的 URL：
 ```
 服务商1: http://127.0.0.1:12345/open.bigmodel.cn/api/coding/paas/v4
-服务商2: http://127.0.0.1:12345/api.psydo.top/v1
+服务商2: http://127.0.0.1:12345/api.openai.com/v1
 服务商3: http://127.0.0.1:12345/api.deepseek.com/v1
 ```
 
