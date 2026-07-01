@@ -128,45 +128,98 @@ class TrayApp:
         webbrowser.open(f"http://127.0.0.1:{self.port}/")
 
     def _open_settings(self, icon, item) -> None:
-        """Open a tkinter settings window to configure the port."""
+        """Open a settings dialog to configure the port.
+
+        macOS: pystray runs menu callbacks on a background thread, where tkinter
+        cannot create a Tk() instance. We use osascript (built-in AppleScript
+        dialog) instead, which works from any thread.
+        Windows: pystray runs callbacks on the main thread; tkinter works fine.
+        """
+        if sys.platform == "darwin":
+            new_port = self._settings_dialog_mac()
+        else:
+            new_port = self._settings_dialog_tk()
+        if new_port is None:
+            return
+        try:
+            p = int(str(new_port).strip())
+            if not (1 <= p <= 65535):
+                raise ValueError
+        except ValueError:
+            self._alert(f"Invalid port: {new_port!r}. Please enter a number between 1 and 65535.")
+            return
+        if p != self.port:
+            self._restart_proxy(p)
+            _save_settings({"port": p})
+            self._alert(f"Port changed to {p}. Proxy restarted.")
+
+    def _settings_dialog_mac(self):
+        """Use osascript to show a native input dialog on macOS."""
+        import subprocess
+        script = (
+            f'set v to text returned of (display dialog "Listen Port:" '
+            f'default answer "{self.port}" buttons {{"Cancel", "OK"}} '
+            f'default button "OK" with title "llm-tap Settings")'
+        )
+        try:
+            r = subprocess.run(
+                ["osascript", "-e", script],
+                capture_output=True, text=True, timeout=120,
+            )
+        except Exception:
+            return None
+        if r.returncode != 0:
+            return None  # user cancelled
+        return r.stdout.strip()
+
+    def _settings_dialog_tk(self):
+        """Use tkinter on Windows/Linux (main thread). Returns None on cancel."""
         try:
             import tkinter as tk
             from tkinter import ttk, messagebox
         except ImportError:
-            return
-
-        # tkinter must run on the main thread on macOS; pystray runs there too.
-        # We create a transient window; the tray loop tolerates this.
+            return None
         win = tk.Tk()
         win.title("llm-tap Settings")
         win.geometry("320x160")
         win.resizable(False, False)
-
         ttk.Label(win, text="Listen Port:").pack(pady=(20, 5))
         port_var = tk.StringVar(value=str(self.port))
         entry = ttk.Entry(win, textvariable=port_var, width=12, justify="center")
         entry.pack(pady=5)
         entry.focus_set()
+        result = {"value": None}
 
-        def _apply():
-            try:
-                p = int(port_var.get().strip())
-                if not (1 <= p <= 65535):
-                    raise ValueError
-            except ValueError:
-                messagebox.showerror("Invalid Port", "Please enter a port between 1 and 65535.", parent=win)
-                return
-            if p != self.port:
-                self._restart_proxy(p)
-                _save_settings({"port": p})
+        def _ok():
+            result["value"] = port_var.get()
+            win.destroy()
+
+        def _cancel():
             win.destroy()
 
         btn_frame = ttk.Frame(win)
         btn_frame.pack(pady=10)
-        ttk.Button(btn_frame, text="OK", command=_apply).pack(side="left", padx=8)
-        ttk.Button(btn_frame, text="Cancel", command=win.destroy).pack(side="left", padx=8)
-
+        ttk.Button(btn_frame, text="OK", command=_ok).pack(side="left", padx=8)
+        ttk.Button(btn_frame, text="Cancel", command=_cancel).pack(side="left", padx=8)
+        win.bind("<Return>", lambda _: _ok())
+        win.bind("<Escape>", lambda _: _cancel())
         win.mainloop()
+        return result["value"]
+
+    def _alert(self, msg: str) -> None:
+        """Show an info alert (mac: osascript, others: tkinter)."""
+        if sys.platform == "darwin":
+            import subprocess
+            subprocess.run(["osascript", "-e", f'display notification "{msg}" with title "llm-tap"'])
+        else:
+            try:
+                import tkinter as tk
+                from tkinter import messagebox
+                root = tk.Tk(); root.withdraw()
+                messagebox.showinfo("llm-tap", msg)
+                root.destroy()
+            except Exception:
+                pass
 
     def _quit(self, icon, item) -> None:
         icon.stop()
