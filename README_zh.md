@@ -49,7 +49,7 @@ LLM 透明代理 + 数据采集系统。
 
 | 产物 | 平台 |
 |------|------|
-| `llm-tap-macos-universal2.tar.gz` | macOS（Intel + Apple Silicon） |
+| `llm-tap-macos-arm64.tar.gz` | macOS Apple Silicon（Intel Mac 通过 Rosetta 2 运行） |
 | `llm-tap-windows-x86_64.zip` | Windows x64 |
 
 解压后启动即可。macOS：`.app` 未签名，首次打开需执行一次 `xattr -cr /path/to/llm-tap.app` 解除隔离。Windows：若 SmartScreen 拦截，选择"更多信息 → 仍要运行"。

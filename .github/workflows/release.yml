@@ -25,27 +25,27 @@ jobs:
           pip install --upgrade pip
           pip install aiohttp aiosqlite pillow pystray pyobjc pyinstaller
 
-      - name: Build universal2 .app
+      - name: Build .app
         shell: bash
         run: |
-          # Build a universal2 app (arm64 + x86_64) on an Apple Silicon runner.
-          # Produces a single llm-tap.app that runs natively on both Intel
-          # and Apple Silicon Macs, without needing the scarce macos-13 runner.
+          # Build an arm64 .app on an Apple Silicon runner.
+          # Intel Macs run it via Rosetta 2 (transparent to the user).
+          # Avoids the scarce macos-13 Intel runner and Pillow's non-universal2
+          # AVIF extension that breaks --target-architecture universal2.
           pyinstaller --windowed --noconfirm \
             --name llm-tap \
             --osx-bundle-identifier com.llmtap.app \
-            --target-architecture universal2 \
             --hidden-import pystray._darwin \
             tray_app.py
 
       - name: Package
         shell: bash
         run: |
-          cd dist && tar -czf ../llm-tap-macos-universal2.tar.gz llm-tap.app
+          cd dist && tar -czf ../llm-tap-macos-arm64.tar.gz llm-tap.app
 
       - uses: softprops/action-gh-release@v2
         with:
-          files: llm-tap-macos-universal2.tar.gz
+          files: llm-tap-macos-arm64.tar.gz
 
   build-windows:
     runs-on: windows-latest
