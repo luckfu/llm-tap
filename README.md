@@ -49,7 +49,8 @@ Download the latest release for your platform from the [Releases page](https://g
 
 | Asset | Platform |
 |-------|----------|
-| `llm-tap-macos-arm64.tar.gz` | macOS Apple Silicon (Intel Macs run via Rosetta 2) |
+| `llm-tap-macos-arm64.tar.gz` | macOS Apple Silicon |
+| `llm-tap-macos-x86_64.tar.gz` | macOS Intel |
 | `llm-tap-windows-x86_64.zip` | Windows x64 |
 
 Unzip and launch. macOS: the `.app` is unsigned, so unblock it once with `xattr -cr /path/to/llm-tap.app`. Windows: if SmartScreen warns, choose "More info → Run anyway".
