@@ -1,6 +1,7 @@
 # Runtime dependencies for llm-tap (proxy + tray app)
 aiohttp
 aiosqlite
+certifi
 pillow
 pystray
 # Platform-specific tray backends (install separately per OS):

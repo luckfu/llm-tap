@@ -31,7 +31,7 @@ jobs:
         shell: bash
         run: |
           pip install --upgrade pip
-          pip install aiohttp aiosqlite pillow pystray pyobjc pyinstaller
+          pip install aiohttp aiosqlite certifi pillow pystray pyobjc pyinstaller
 
       - name: Build .app
         shell: bash
@@ -67,7 +67,7 @@ jobs:
         shell: bash
         run: |
           pip install --upgrade pip
-          pip install aiohttp aiosqlite pillow pystray pywin32 pyinstaller
+          pip install aiohttp aiosqlite certifi pillow pystray pywin32 pyinstaller
 
       - name: Build .exe
         shell: bash
