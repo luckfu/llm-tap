@@ -32,7 +32,21 @@ import json
 import asyncio
 import aiosqlite
 from datetime import datetime
-from typing import Optional, Dict, Any, List, Iterable
+from typing import Optional, Dict, Any, List, Iterable, Callable
+
+
+# ========== 调用保存事件钩子（供托盘等外部组件订阅） ==========
+
+_call_saved_callbacks: List[Callable[[Dict[str, Any]], None]] = []
+
+
+def register_call_saved_callback(fn: Callable[[Dict[str, Any]], None]) -> None:
+    """Register a callback(meta: dict) fired after each successful save.
+
+    Callbacks run in the proxy's asyncio loop thread; they must be non-blocking
+    and thread-safe (e.g., updating a tray icon via pystray).
+    """
+    _call_saved_callbacks.append(fn)
 
 
 # ========== 数据库 ==========
@@ -241,6 +255,13 @@ async def save_raw_call(
             ),
         )
         await conn.commit()
+
+    # 通知订阅者（托盘等外部组件）
+    for cb in _call_saved_callbacks:
+        try:
+            cb(meta)
+        except Exception:
+            pass
 
     return file_path
 

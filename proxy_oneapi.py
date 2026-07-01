@@ -793,15 +793,20 @@ loadCalls();
 
 # ========== 主函数 ==========
 
-async def main():
-    server = ProxyServer(args.config, args.port)
-    # 前端路由（优先注册，在 catch-all 之前匹配）
+def _register_routes(server: "ProxyServer") -> None:
+    """Register frontend + proxy routes on a server instance."""
     server.app.router.add_get("/", server.handle_index)
     server.app.router.add_get("/api/calls", server.handle_api_calls)
     server.app.router.add_get("/api/calls/{call_id}", server.handle_api_call_detail)
     server.app.router.add_get("/api/stats", server.handle_api_stats)
-    # catch-all 代理路由
     server.app.router.add_route("*", "/{path_info:.*}", server.handle_proxy)
+
+
+async def main():
+    a = parse_args()
+    logging.getLogger().setLevel(getattr(logging, a.log_level.upper()))
+    server = ProxyServer(a.config, a.port, log_level=a.log_level)
+    _register_routes(server)
     await server.start()
     try:
         while True:
@@ -809,6 +814,32 @@ async def main():
     except KeyboardInterrupt:
         logger.info("Server shutting down...")
     return server
+
+
+def start_proxy_in_thread(port: int = 8000, config: str = "config.json",
+                         log_level: str = "INFO", on_started=None):
+    """Start the proxy in a background daemon thread (for embedding in tray apps).
+
+    Returns the started threading.Thread instance.
+    """
+    import threading
+
+    def _run():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        server = ProxyServer(config, port, log_level=log_level)
+        _register_routes(server)
+        try:
+            loop.run_until_complete(server.start())
+            if on_started:
+                on_started()
+            loop.run_forever()
+        except Exception as e:
+            logger.error(f"Proxy thread error: {e}")
+
+    t = threading.Thread(target=_run, name="proxy-loop", daemon=True)
+    t.start()
+    return t
 
 
 if __name__ == "__main__":

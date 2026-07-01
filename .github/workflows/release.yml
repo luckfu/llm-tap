@@ -1,0 +1,79 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-13
+            name: llm-tap-macos-x86_64
+            backend: pyobjc
+            pystray_backend: pystray._darwin
+          - os: macos-14
+            name: llm-tap-macos-arm64
+            backend: pyobjc
+            pystray_backend: pystray._darwin
+          - os: windows-latest
+            name: llm-tap-windows-x86_64
+            backend: pywin32
+            pystray_backend: pystray._win32
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          pip install --upgrade pip
+          pip install aiohttp aiosqlite pillow pystray ${{ matrix.backend }} pyinstaller
+
+      - name: Build (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          pyinstaller --windowed --noconfirm \
+            --name llm-tap \
+            --osx-bundle-identifier com.llmtap.app \
+            --hidden-import ${{ matrix.pystray_backend }} \
+            tray_app.py
+
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          pyinstaller --windowed --noconfirm \
+            --name llm-tap \
+            --hidden-import ${{ matrix.pystray_backend }} \
+            tray_app.py
+
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          cd dist && tar -czf ../${{ matrix.name }}.tar.gz llm-tap.app
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist/llm-tap.exe -DestinationPath ${{ matrix.name }}.zip
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ matrix.name }}.tar.gz
+            ${{ matrix.name }}.zip

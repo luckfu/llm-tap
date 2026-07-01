@@ -168,10 +168,13 @@ Anthropic 协议的 `thinking` block（含 `signature`）、`tool_use` block、`
 
 ```
 llm-tap/
-├── proxy_oneapi.py    # 透明代理服务器
-├── raw_storage.py     # 原始调用保真存储
-├── stream_merger.py   # 流式响应整合（OpenAI Chat / Anthropic Messages）
-└── utils.py           # 异步日志 + 数据库初始化
+├── proxy_oneapi.py        # 透明代理服务器
+├── raw_storage.py         # 原始调用保真存储（含事件钩子）
+├── stream_merger.py       # 流式响应整合（OpenAI Chat / Anthropic Messages）
+├── utils.py               # 异步日志 + 数据库初始化
+├── tray_app.py            # 菜单栏 / 系统托盘应用入口
+├── requirements-app.txt   # 代理 + 托盘应用依赖
+└── .github/workflows/     # 发布构建（mac x86_64 / arm64、windows x86_64）
 ```
 
 ## 启动参数
@@ -184,6 +187,35 @@ python3 proxy_oneapi.py -p 12345 --log-level INFO
 |------|--------|------|
 | `-p, --port` | 12345 | 监听端口 |
 | `--log-level` | INFO | 日志级别（DEBUG/INFO/WARNING/ERROR） |
+
+## 桌面应用（菜单栏 / 系统托盘）
+
+通过 `tray_app.py` 提供托盘包装：在后台启动代理，并在 macOS 顶部菜单栏 / Windows 系统托盘显示图标，**每采集到一次调用就变绿并显示计数徽标约 2 秒**。
+
+```bash
+pip install -r requirements-app.txt
+# macOS 后端：
+pip install pyobjc
+# Windows 后端：
+pip install pywin32
+
+python3 tray_app.py                 # 默认端口 8000
+LLM_TAP_PORT=12345 python3 tray_app.py
+```
+
+作为桌面应用运行时，数据存放在 `~/.llm-tap/`。托盘菜单：打开 Web 界面、查看采集数量、退出。
+
+### 预构建发布版
+
+每次打 `v*` 标签时由 GitHub Actions 自动发布：
+
+| 产物 | 平台 |
+|------|------|
+| `llm-tap-macos-x86_64.tar.gz` | macOS Intel |
+| `llm-tap-macos-arm64.tar.gz` | macOS Apple Silicon |
+| `llm-tap-windows-x86_64.zip` | Windows x64 |
+
+可在 [Releases 页面](https://github.com/luckfu/llm-tap/releases) 下载。
 
 ## 设计原则
 

@@ -168,10 +168,13 @@ Anthropic's `thinking` block (with `signature`), `tool_use` block, `tool_result`
 
 ```
 llm-tap/
-├── proxy_oneapi.py    # Transparent proxy server
-├── raw_storage.py     # Faithful call storage
-├── stream_merger.py   # Stream response merging (OpenAI Chat / Anthropic Messages)
-└── utils.py           # Async logging + database init
+├── proxy_oneapi.py        # Transparent proxy server
+├── raw_storage.py         # Faithful call storage (+ event hook)
+├── stream_merger.py       # Stream response merging (OpenAI Chat / Anthropic Messages)
+├── utils.py               # Async logging + database init
+├── tray_app.py            # Menu-bar / system-tray app entry point
+├── requirements-app.txt   # Dependencies for proxy + tray app
+└── .github/workflows/     # Release build (mac x86_64 / arm64, windows x86_64)
 ```
 
 ## Launch Parameters
@@ -184,6 +187,35 @@ python3 proxy_oneapi.py -p 12345 --log-level INFO
 |-----------|---------|-------------|
 | `-p, --port` | 12345 | Listen port |
 | `--log-level` | INFO | Log level (DEBUG/INFO/WARNING/ERROR) |
+
+## Desktop App (Menu Bar / System Tray)
+
+A tray wrapper is available via `tray_app.py`. It starts the proxy in the background and shows an icon in the macOS menu bar / Windows system tray that turns **green with a count badge** for ~2s whenever a call is captured.
+
+```bash
+pip install -r requirements-app.txt
+# macOS backend:
+pip install pyobjc
+# Windows backend:
+pip install pywin32
+
+python3 tray_app.py                 # default port 8000
+LLM_TAP_PORT=12345 python3 tray_app.py
+```
+
+Data is stored under `~/.llm-tap/` when running as a desktop app. Tray menu: open Web UI, view captured count, quit.
+
+### Prebuilt Releases
+
+Prebuilt binaries are published via GitHub Actions on every `v*` tag:
+
+| Asset | Platform |
+|-------|----------|
+| `llm-tap-macos-x86_64.tar.gz` | macOS Intel |
+| `llm-tap-macos-arm64.tar.gz` | macOS Apple Silicon |
+| `llm-tap-windows-x86_64.zip` | Windows x64 |
+
+Download from the [Releases page](https://github.com/luckfu/llm-tap/releases).
 
 ## Design Principles
 
