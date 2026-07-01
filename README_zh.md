@@ -200,6 +200,18 @@ python3 proxy_oneapi.py -p 12345 --log-level INFO
 - 统计概览（按 host、协议、模型统计）
 - 中英文切换
 
+### 调用列表
+
+![调用列表](docs/screenshots/overview-en.png)
+
+### 调用详情
+
+![调用详情](docs/screenshots/detail-en.png)
+
+### 统计概览
+
+![统计概览](docs/screenshots/stats-en.png)
+
 ## 常见问题
 
 ### curl 报 `Failed to connect to 127.0.0.1 port 7890`

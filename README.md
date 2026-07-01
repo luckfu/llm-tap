@@ -200,6 +200,18 @@ Visit `http://127.0.0.1:12345/` in browser for a management interface with:
 - Statistics overview (by host, protocol, model)
 - Chinese/English language switch
 
+### Call List
+
+![Call List](docs/screenshots/overview-en.png)
+
+### Call Detail
+
+![Call Detail](docs/screenshots/detail-en.png)
+
+### Statistics Overview
+
+![Statistics Overview](docs/screenshots/stats-en.png)
+
 ## FAQ
 
 ### curl reports `Failed to connect to 127.0.0.1 port 7890`
