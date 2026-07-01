@@ -41,9 +41,26 @@ Real LLM provider (SiliconFlow / DeepSeek / Zhipu / Anthropic / OpenAI / any)
 
 ## Quick Start
 
-### 1. Start the proxy
+### 1. Get the app
+
+**Option A — Prebuilt binary (recommended)**
+
+Download the latest release for your platform from the [Releases page](https://github.com/luckfu/llm-tap/releases):
+
+| Asset | Platform |
+|-------|----------|
+| `llm-tap-macos-arm64.tar.gz` | macOS Apple Silicon |
+| `llm-tap-macos-x86_64.tar.gz` | macOS Intel |
+| `llm-tap-windows-x86_64.zip` | Windows x64 |
+
+Unzip and launch. macOS: the `.app` is unsigned, so unblock it once with `xattr -cr /path/to/llm-tap.app`. Windows: if SmartScreen warns, choose "More info → Run anyway".
+
+The tray app starts the proxy on port `12345` by default. Open the Web UI from the tray menu, or change the port via **Settings...**.
+
+**Option B — Run from source**
 
 ```bash
+pip install -r requirements.txt
 python3 proxy_oneapi.py -p 12345
 ```
 
@@ -190,7 +207,9 @@ python3 proxy_oneapi.py -p 12345 --log-level INFO
 
 ## Desktop App (Menu Bar / System Tray)
 
-A tray wrapper is available via `tray_app.py`. It starts the proxy in the background and shows a teardrop icon in the macOS menu bar / Windows system tray — blue-teal when idle, **green with a soft glow and a red count badge** for ~2s whenever a call is captured. The tray menu lets you open the Web UI, change the listen port (persisted to `~/.llm-tap/settings.json`), and quit.
+`tray_app.py` wraps the proxy in a menu-bar (macOS) / system-tray (Windows) app. It shows a teardrop icon — blue-teal when idle, **green with a soft glow and a red count badge** for ~2s whenever a call is captured. The tray menu lets you open the Web UI, change the listen port (persisted to `~/.llm-tap/settings.json`), and quit.
+
+Run from source:
 
 ```bash
 pip install -r requirements-app.txt
@@ -203,27 +222,7 @@ python3 tray_app.py                 # default port 12345
 LLM_TAP_PORT=9000 python3 tray_app.py
 ```
 
-Data is stored under `~/.llm-tap/` when running as a desktop app.
-
-### Prebuilt Releases
-
-Prebuilt binaries are published via GitHub Actions on every `v*` tag:
-
-| Asset | Platform |
-|-------|----------|
-| `llm-tap-macos-x86_64.tar.gz` | macOS Intel |
-| `llm-tap-macos-arm64.tar.gz` | macOS Apple Silicon |
-| `llm-tap-windows-x86_64.zip` | Windows x64 |
-
-Download from the [Releases page](https://github.com/luckfu/llm-tap/releases).
-
-**macOS**: the downloaded `.app` is unsigned, so Gatekeeper will block it on first launch. Unblock with:
-
-```bash
-xattr -cr /path/to/llm-tap.app
-```
-
-**Windows**: SmartMark may warn about an unsigned `.exe`; choose "More info → Run anyway".
+Prebuilt binaries are published via GitHub Actions on every `v*` tag — see **Quick Start** above for download links and launch notes. Data is stored under `~/.llm-tap/` when running as a desktop app.
 
 ## Design Principles
 
