@@ -29,7 +29,7 @@ import aiosqlite
 from aiohttp import web
 from datetime import datetime
 from typing import Optional, Dict, Any
-from utils import init_async_logger, get_async_logger, init_db_path
+from utils import init_async_logger, get_async_logger, init_db_path, ensure_ssl_cert_file
 from raw_storage import save_raw_call, init_calls_table, extract_agent_metadata
 from stream_merger import OpenAIChatMerger, AnthropicMessagesMerger
 
@@ -107,6 +107,7 @@ def verify_auth(request: web.Request, config: dict) -> bool:
 
 class ProxyServer:
     def __init__(self, config_path: str, port: int = 8000, log_level: str = "INFO"):
+        self.ssl_cert_file = ensure_ssl_cert_file()
         self.config = load_config(config_path)
         self.app = web.Application()
         self.port = port
@@ -119,6 +120,8 @@ class ProxyServer:
                                 getattr(logging, self.log_level.upper()))
         self.async_logger = get_async_logger()
         await self.async_logger.info("Async logger initialized")
+        if self.ssl_cert_file:
+            await self.async_logger.info(f"Using CA bundle: {self.ssl_cert_file}")
         await init_db_path("calls.db")
         await init_calls_table("calls.db")
         await self.async_logger.info("Database initialized")
