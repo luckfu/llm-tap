@@ -9,3 +9,10 @@ data/
 .waylog/
 .vscode/
 .claude/
+
+# PyInstaller build artifacts
+build/
+dist/
+*.spec
+llm-tap-*.tar.gz
+llm-tap-*.zip
