@@ -20,7 +20,6 @@ import webbrowser
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 import pystray
 
-import proxy_oneapi
 from raw_storage import register_call_saved_callback
 
 
@@ -229,6 +228,8 @@ class TrayApp:
     # ---------- proxy lifecycle ----------
 
     def _start_proxy(self) -> None:
+        import proxy_oneapi
+
         os.makedirs(self.data_dir, exist_ok=True)
         os.chdir(self.data_dir)
         self.proxy_handle = proxy_oneapi.start_proxy_in_thread(
