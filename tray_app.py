@@ -297,72 +297,22 @@ class TrayApp:
     def _settings_dialog(self):
         """Show a single cross-platform settings window in a helper process."""
         import subprocess
-        import textwrap
 
-        script = textwrap.dedent(
-            f"""
-            import json
-            import sys
-
-            try:
-                import tkinter as tk
-                from tkinter import ttk, filedialog
-            except Exception:
-                sys.exit(1)
-
-            root = tk.Tk()
-            root.title("llm-tap Settings")
-            root.geometry("560x210")
-            root.resizable(False, False)
-
-            body = ttk.Frame(root, padding=18)
-            body.pack(fill="both", expand=True)
-            body.columnconfigure(1, weight=1)
-
-            ttk.Label(body, text="Listen Port:").grid(row=0, column=0, sticky="w", pady=(0, 6))
-            port_var = tk.StringVar(value={json.dumps(str(self.port))})
-            port_entry = ttk.Entry(body, textvariable=port_var, width=12)
-            port_entry.grid(row=0, column=1, sticky="w", pady=(0, 6))
-            port_entry.focus_set()
-
-            ttk.Label(body, text="Data Directory:").grid(row=1, column=0, sticky="w", pady=(8, 6))
-            data_dir_var = tk.StringVar(value={json.dumps(self.data_dir)})
-            data_entry = ttk.Entry(body, textvariable=data_dir_var, width=46)
-            data_entry.grid(row=1, column=1, sticky="ew", pady=(8, 6))
-
-            def browse():
-                selected = filedialog.askdirectory(initialdir=data_dir_var.get() or {json.dumps(self.data_dir)})
-                if selected:
-                    data_dir_var.set(selected)
-
-            ttk.Button(body, text="Browse...", command=browse).grid(row=1, column=2, padx=(8, 0), pady=(8, 6))
-
-            result = {{"value": None}}
-
-            def ok():
-                result["value"] = {{"port": port_var.get(), "data_dir": data_dir_var.get()}}
-                root.destroy()
-
-            def cancel():
-                root.destroy()
-
-            btns = ttk.Frame(root)
-            btns.pack(pady=10)
-            ttk.Button(btns, text="OK", command=ok).pack(side="left", padx=8)
-            ttk.Button(btns, text="Cancel", command=cancel).pack(side="left", padx=8)
-            root.bind("<Return>", lambda _event: ok())
-            root.bind("<Escape>", lambda _event: cancel())
-            root.protocol("WM_DELETE_WINDOW", cancel)
-            root.mainloop()
-
-            if result["value"] is None:
-                sys.exit(2)
-            sys.stdout.write(json.dumps(result["value"], ensure_ascii=False))
-            """
-        )
-
+        env = os.environ.copy()
+        env["LLM_TAP_DIALOG_PORT"] = str(self.port)
+        env["LLM_TAP_DIALOG_DATA_DIR"] = self.data_dir
+        if getattr(sys, "frozen", False):
+            cmd = [sys.executable, "--settings-dialog"]
+        else:
+            cmd = [sys.executable, os.path.abspath(__file__), "--settings-dialog"]
         try:
-            r = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=120)
+            r = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=120,
+                env=env,
+            )
         except Exception:
             return None
         if r.returncode != 0:
@@ -403,10 +353,73 @@ class TrayApp:
 
 
 def main() -> None:
+    if "--settings-dialog" in sys.argv:
+        _run_settings_dialog()
+        return
     settings = _load_settings()
     port = int(os.environ.get("LLM_TAP_PORT") or settings.get("port") or DEFAULT_PORT)
     data_dir = os.environ.get("LLM_TAP_DATA_DIR") or settings.get("data_dir") or DEFAULT_DATA_DIR
     TrayApp(port=port, data_dir=data_dir).run()
+
+
+def _run_settings_dialog() -> None:
+    try:
+        import tkinter as tk
+        from tkinter import ttk, filedialog
+    except Exception:
+        sys.exit(1)
+
+    port_default = os.environ.get("LLM_TAP_DIALOG_PORT", str(DEFAULT_PORT))
+    data_dir_default = os.environ.get("LLM_TAP_DIALOG_DATA_DIR", DEFAULT_DATA_DIR)
+
+    root = tk.Tk()
+    root.title("llm-tap Settings")
+    root.geometry("560x210")
+    root.resizable(False, False)
+
+    body = ttk.Frame(root, padding=18)
+    body.pack(fill="both", expand=True)
+    body.columnconfigure(1, weight=1)
+
+    ttk.Label(body, text="Listen Port:").grid(row=0, column=0, sticky="w", pady=(0, 6))
+    port_var = tk.StringVar(value=port_default)
+    port_entry = ttk.Entry(body, textvariable=port_var, width=12)
+    port_entry.grid(row=0, column=1, sticky="w", pady=(0, 6))
+    port_entry.focus_set()
+
+    ttk.Label(body, text="Data Directory:").grid(row=1, column=0, sticky="w", pady=(8, 6))
+    data_dir_var = tk.StringVar(value=data_dir_default)
+    data_entry = ttk.Entry(body, textvariable=data_dir_var, width=46)
+    data_entry.grid(row=1, column=1, sticky="ew", pady=(8, 6))
+
+    def browse():
+        selected = filedialog.askdirectory(initialdir=data_dir_var.get() or data_dir_default)
+        if selected:
+            data_dir_var.set(selected)
+
+    ttk.Button(body, text="Browse...", command=browse).grid(row=1, column=2, padx=(8, 0), pady=(8, 6))
+
+    result = {"value": None}
+
+    def ok():
+        result["value"] = {"port": port_var.get(), "data_dir": data_dir_var.get()}
+        root.destroy()
+
+    def cancel():
+        root.destroy()
+
+    btns = ttk.Frame(root)
+    btns.pack(pady=10)
+    ttk.Button(btns, text="OK", command=ok).pack(side="left", padx=8)
+    ttk.Button(btns, text="Cancel", command=cancel).pack(side="left", padx=8)
+    root.bind("<Return>", lambda _event: ok())
+    root.bind("<Escape>", lambda _event: cancel())
+    root.protocol("WM_DELETE_WINDOW", cancel)
+    root.mainloop()
+
+    if result["value"] is None:
+        sys.exit(2)
+    sys.stdout.write(json.dumps(result["value"], ensure_ascii=False))
 
 
 if __name__ == "__main__":
