@@ -31,7 +31,7 @@ from aiohttp import web
 from datetime import datetime
 from typing import Optional, Dict, Any
 from utils import init_async_logger, get_async_logger, init_db_path, ensure_ssl_cert_file
-from raw_storage import save_raw_call, init_calls_table, extract_agent_metadata
+from raw_storage import RawCallWriter, init_calls_table, extract_agent_metadata
 from stream_merger import OpenAIChatMerger, AnthropicMessagesMerger
 
 
@@ -202,6 +202,14 @@ class ProxyServer:
         self.log_level = log_level
         self.runner: Optional[web.AppRunner] = None
         self.session: Optional[aiohttp.ClientSession] = None
+        self.raw_writer: Optional[RawCallWriter] = None
+        self.db_path = "calls.db"
+        self.capture_max_bytes = int(self.config.get("capture_max_bytes", 64 * 1024 * 1024))
+        self.stream_capture_max_bytes = int(self.config.get("stream_capture_max_bytes", self.capture_max_bytes))
+        self.request_max_bytes = int(self.config.get("request_max_bytes", 8_000_000))
+        self.save_queue_max = int(self.config.get("save_queue_max", 1000))
+        self.save_batch_size = int(self.config.get("save_batch_size", 20))
+        self.json_indent = 2 if self.config.get("pretty_json", False) else None
         self.app.on_startup.append(self.init_async_resources)
 
     async def init_async_resources(self, app):
@@ -211,12 +219,26 @@ class ProxyServer:
         await self.async_logger.info("Async logger initialized")
         if self.ssl_cert_file:
             await self.async_logger.info(f"Using CA bundle: {self.ssl_cert_file}")
-        await init_db_path("calls.db")
-        await init_calls_table("calls.db")
+        await init_db_path(self.db_path)
+        await init_calls_table(self.db_path)
+        self.raw_writer = RawCallWriter(
+            self.db_path,
+            max_queue=self.save_queue_max,
+            batch_size=self.save_batch_size,
+            json_indent=self.json_indent,
+        )
+        await self.raw_writer.start()
         await self.async_logger.info("Database initialized")
         # Reuse a single ClientSession for all upstream requests so connections
         # are pooled and DNS/TCP handshakes aren't repeated per request.
-        self.session = aiohttp.ClientSession()
+        connector = aiohttp.TCPConnector(
+            limit=int(self.config.get("upstream_conn_limit", 1000)),
+            limit_per_host=int(self.config.get("upstream_conn_limit_per_host", 0)),
+            ttl_dns_cache=int(self.config.get("upstream_dns_cache_ttl", 300)),
+            keepalive_timeout=float(self.config.get("upstream_keepalive_timeout", 30)),
+            enable_cleanup_closed=True,
+        )
+        self.session = aiohttp.ClientSession(connector=connector)
 
     async def start(self):
         self.runner = web.AppRunner(self.app)
@@ -234,6 +256,9 @@ class ProxyServer:
         if self.session is not None:
             await self.session.close()
             self.session = None
+        if self.raw_writer is not None:
+            await self.raw_writer.stop(drain=True)
+            self.raw_writer = None
         if self.runner is not None:
             await self.runner.cleanup()
             self.runner = None
@@ -258,8 +283,9 @@ class ProxyServer:
         host = path_stripped[:first_slash]
         rest_path = path_stripped[first_slash:]
 
-        # 重建上游 URL
-        upstream_url = f"https://{host}{rest_path}"
+        # 重建上游 URL，保留原始 query string
+        query = request.rel_url.query_string
+        upstream_url = f"https://{host}{rest_path}" + (f"?{query}" if query else "")
         protocol = detect_protocol_from_path(rest_path)
 
         # 构建上游 headers
@@ -271,19 +297,19 @@ class ProxyServer:
 
         try:
             session = self.session
+            if session is None:
+                return web.Response(status=503, text=json.dumps({"error": "proxy session is not ready"}))
             timeout = aiohttp.ClientTimeout(total=300, connect=30, sock_connect=30, sock_read=600)
 
             # GET 请求（如 /v1/models 模型列表）：纯透传，不保存
             if method == "GET":
                 async with session.get(upstream_url, headers=upstream_headers, timeout=timeout) as resp:
-                    body = await resp.read()
                     await self.async_logger.info(f"   GET response: {resp.status}")
-                    return web.Response(status=resp.status, body=body,
-                                        content_type="application/json")
+                    return await self._relay_response(request, resp)
 
             # POST 请求（对话/补全/嵌入等）
             request_body = await request.read()
-            if len(request_body) > 8000000:
+            if len(request_body) > self.request_max_bytes:
                 return web.Response(status=413, text=json.dumps({"error": "请求体过大"}))
 
             # 解析请求
@@ -313,10 +339,14 @@ class ProxyServer:
 
                 # 失败：只记日志，不存文件
                 if resp.status != 200:
-                    error_text = await resp.text()
-                    await self.async_logger.error(f"Upstream error: {resp.status}, {error_text[:500]}")
-                    return web.Response(status=resp.status, text=error_text,
-                                        content_type="application/json")
+                    error_body = await resp.read()
+                    error_preview = error_body[:500].decode("utf-8", errors="replace")
+                    await self.async_logger.error(f"Upstream error: {resp.status}, {error_preview}")
+                    return web.Response(
+                        status=resp.status,
+                        body=error_body,
+                        headers=self._build_response_headers(resp),
+                    )
 
                 # ========== 流式 ==========
                 if is_stream:
@@ -343,6 +373,10 @@ class ProxyServer:
         skip_headers = {
             "host", "content-length", "transfer-encoding", "connection",
             "keep-alive", "upgrade", "proxy-authorization", "proxy-authenticate",
+            "te", "trailer",
+            # Avoid compressed upstream bodies so capture parsing and response
+            # header passthrough remain consistent.
+            "accept-encoding",
         }
         # agent 元数据头不转发给上游
         skip_headers.update({"x-session-id", "x-agent-id", "x-parent-call-id"})
@@ -351,23 +385,61 @@ class ProxyServer:
         for k, v in request.headers.items():
             if k.lower() not in skip_headers:
                 headers[k] = v
-        headers["Content-Type"] = "application/json"
+        if request.can_read_body:
+            headers.setdefault("Content-Type", "application/json")
+        headers["Accept-Encoding"] = "identity"
         return headers
+
+    def _build_response_headers(self, resp) -> dict:
+        skip_headers = {
+            "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
+            "te", "trailer", "transfer-encoding", "upgrade", "content-length",
+        }
+        return {k: v for k, v in resp.headers.items() if k.lower() not in skip_headers}
+
+    async def _relay_response(self, request: web.Request, resp) -> web.StreamResponse:
+        response = web.StreamResponse(status=resp.status, headers=self._build_response_headers(resp))
+        await response.prepare(request)
+        try:
+            async for chunk in resp.content.iter_chunked(65536):
+                if request.transport is None or request.transport.is_closing():
+                    break
+                await response.write(chunk)
+        finally:
+            try:
+                await response.write_eof()
+            except Exception:
+                pass
+        return response
+
+    async def _queue_raw_save(self, *, call_id: str, **kwargs) -> None:
+        if self.raw_writer is None:
+            await self.async_logger.error(f"Raw save dropped for {call_id}: writer not ready")
+            return
+        ok = self.raw_writer.enqueue(call_id=call_id, **kwargs)
+        if ok:
+            await self.async_logger.info(f"Raw save queued: {call_id}")
+        else:
+            await self.async_logger.error(
+                f"Raw save dropped for {call_id}: queue full "
+                f"({self.raw_writer.max_queue}), dropped={self.raw_writer.dropped}"
+            )
 
     async def _handle_stream(self, request: web.Request, resp, protocol: str, call_id: str,
                              host: str, model_id: str, raw_request_body: bytes,
                              started_at: datetime,
                              first_token_at: Optional[datetime], agent_meta: dict) -> web.StreamResponse:
         """处理流式响应：透传给客户端 + 整合保存"""
-        response = web.StreamResponse(status=200, headers={
-            "Content-Type": resp.headers.get("Content-Type", "text/event-stream"),
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-        })
+        headers = self._build_response_headers(resp)
+        headers.setdefault("Content-Type", "text/event-stream")
+        headers.setdefault("Cache-Control", "no-cache")
+        response = web.StreamResponse(status=200, headers=headers)
         await response.prepare(request)
 
         merger = None
         completed_response = None
+        captured_stream_bytes = 0
+        stream_capture_truncated = False
 
         # 按协议选 merger
         if protocol == "openai-chat":
@@ -380,26 +452,34 @@ class ProxyServer:
             async for line in resp.content:
                 try:
                     if request.transport is None or request.transport.is_closing():
+                        stream_capture_truncated = True
                         break
                     line_bytes = line
-                    line_str = line.decode("utf-8")
+                    line_str = line.decode("utf-8", errors="replace")
 
                     await response.write(line_bytes)
 
                     if first_token_at is None and line_str.startswith("data:"):
                         first_token_at = datetime.now()
 
-                    # 喂给 merger
-                    if merger:
-                        merger.feed_raw_line(line_str)
-                    # Responses API: 捕获 response.completed
-                    elif protocol == "openai-responses" and line_str.startswith("data:"):
-                        try:
-                            event_data = json.loads(line_str[5:].strip())
-                            if event_data.get("type") == "response.completed":
-                                completed_response = event_data.get("response")
-                        except json.JSONDecodeError:
-                            pass
+                    if (
+                        self.stream_capture_max_bytes > 0
+                        and captured_stream_bytes + len(line_bytes) > self.stream_capture_max_bytes
+                    ):
+                        stream_capture_truncated = True
+                    elif not stream_capture_truncated:
+                        captured_stream_bytes += len(line_bytes)
+                        # 喂给 merger
+                        if merger:
+                            merger.feed_raw_line(line_str)
+                        # Responses API: 捕获 response.completed
+                        elif protocol == "openai-responses" and line_str.startswith("data:"):
+                            try:
+                                event_data = json.loads(line_str[5:].strip())
+                                if event_data.get("type") == "response.completed":
+                                    completed_response = event_data.get("response")
+                            except json.JSONDecodeError:
+                                pass
 
                     # 结束判断
                     if line_str.strip() == "data: [DONE]":
@@ -421,13 +501,17 @@ class ProxyServer:
             else:
                 merged = {"note": f"no merger for protocol {protocol}"}
                 stop_reason = None
+            if stream_capture_truncated:
+                merged["_llm_tap_truncated"] = True
+                merged["_captured_bytes"] = captured_stream_bytes
+                merged["_capture_max_bytes"] = self.stream_capture_max_bytes
 
             # 保存 raw
             try:
-                await save_raw_call(
-                    "calls.db", call_id=call_id, protocol=protocol,
-                    request_path=request.path, request_body=raw_request_body,
-                    request_headers=request.headers, upstream_provider=host,
+                await self._queue_raw_save(
+                    call_id=call_id, protocol=protocol,
+                    request_path=request.raw_path, request_body=raw_request_body,
+                    request_headers=list(request.headers.items()), upstream_provider=host,
                     upstream_model=model_id, client_model_alias=model_id,
                     started_at=started_at, finished_at=datetime.now(),
                     first_token_ms=(int((first_token_at - started_at).total_seconds() * 1000)
@@ -435,7 +519,7 @@ class ProxyServer:
                     upstream_status=200, stop_reason=stop_reason,
                     response_body=merged, is_stream=True, **agent_meta,
                 )
-                await self.async_logger.info(f"Stream raw saved: {call_id}")
+                await self.async_logger.info(f"Stream raw enqueue attempted: {call_id}")
             except Exception as e:
                 await self.async_logger.error(f"Failed to save stream raw: {e}")
 
@@ -453,22 +537,51 @@ class ProxyServer:
     async def _handle_non_stream(self, resp, protocol: str, call_id: str,
                                  host: str, model_id: str, raw_request_body: bytes,
                                  orig_request: web.Request, started_at: datetime,
-                                 agent_meta: dict) -> web.Response:
+                                 agent_meta: dict) -> web.StreamResponse:
         """处理非流式响应：原样返回 + 保存
 
-        先读 raw bytes 再 try json：有些上游对 stream=false 请求仍返回
-        text/event-stream，直接 resp.json() 会抛 ContentTypeError 导致请求
-        500 失败且数据丢失。读 bytes 后容错解析，解析失败也原样透传给客户端。
+        边读上游边回写客户端，同时按 capture_max_bytes 累积用于后台保存。
+        这样客户端不需要等待 JSON 落盘和 SQLite commit。
         """
-        raw_bytes = await resp.read()
-        response_json = None
+        response = web.StreamResponse(status=200, headers=self._build_response_headers(resp))
+        await response.prepare(orig_request)
+
+        chunks = []
+        captured = 0
+        truncated = False
         try:
-            response_json = json.loads(raw_bytes)
-        except (json.JSONDecodeError, UnicodeDecodeError):
+            async for chunk in resp.content.iter_chunked(65536):
+                if orig_request.transport is None or orig_request.transport.is_closing():
+                    truncated = True
+                    break
+                await response.write(chunk)
+
+                if captured < self.capture_max_bytes:
+                    remaining = self.capture_max_bytes - captured
+                    chunks.append(chunk[:remaining])
+                    captured += min(len(chunk), remaining)
+                    if len(chunk) > remaining:
+                        truncated = True
+                else:
+                    truncated = True
+        finally:
+            try:
+                await response.write_eof()
+            except Exception:
+                pass
+
+        raw_bytes = b"".join(chunks)
+        response_json = None
+        if not truncated:
+            try:
+                response_json = json.loads(raw_bytes)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                pass
+        if response_json is None:
             # 上游返回非 JSON（如 SSE 流 / 纯文本错误），原样透传不丢数据
             await self.async_logger.warning(
                 f"Non-stream response is not JSON (content-type={resp.headers.get('Content-Type')!r}), "
-                f"passing through {len(raw_bytes)} bytes as-is for {call_id}"
+                f"captured {len(raw_bytes)} bytes as raw text for {call_id}"
             )
 
         if response_json is not None:
@@ -485,27 +598,29 @@ class ProxyServer:
 
         # 只要上游 200 就保存（非 JSON 时 response_body 用原始文本）
         try:
-            await save_raw_call(
-                "calls.db", call_id=call_id, protocol=protocol,
-                request_path=orig_request.path, request_body=raw_request_body,
-                request_headers=orig_request.headers, upstream_provider=host,
+            raw_response = raw_bytes.decode("utf-8", errors="replace")
+            raw_body = {"_raw": raw_response}
+            if truncated:
+                raw_body["_truncated"] = True
+                raw_body["_captured_bytes"] = len(raw_bytes)
+                raw_body["_capture_max_bytes"] = self.capture_max_bytes
+
+            await self._queue_raw_save(
+                call_id=call_id, protocol=protocol,
+                request_path=orig_request.raw_path, request_body=raw_request_body,
+                request_headers=list(orig_request.headers.items()), upstream_provider=host,
                 upstream_model=model_id, client_model_alias=model_id,
                 started_at=started_at, finished_at=datetime.now(),
                 upstream_status=200, stop_reason=stop_reason,
                 response_body=(response_json if response_json is not None
-                                else {"_raw": raw_bytes.decode("utf-8", errors="replace")}),
+                                else raw_body),
                 is_stream=False, **agent_meta,
             )
-            await self.async_logger.info(f"Non-stream raw saved: {call_id}")
+            await self.async_logger.info(f"Non-stream raw enqueue attempted: {call_id}")
         except Exception as e:
             await self.async_logger.error(f"Failed to save non-stream raw: {e}")
 
-        # 原样返回：JSON 重新序列化保证格式；非 JSON 直接回 raw bytes
-        if response_json is not None:
-            body = json.dumps(response_json, ensure_ascii=False).encode("utf-8")
-            return web.Response(status=200, body=body, content_type="application/json")
-        return web.Response(status=200, body=raw_bytes,
-                            content_type=resp.headers.get("Content-Type", "application/octet-stream"))
+        return response
 
     # ========== 前端 Web UI ==========
 
@@ -547,7 +662,7 @@ class ProxyServer:
 
         where_clause = (" WHERE " + " AND ".join(where)) if where else ""
 
-        async with aiosqlite.connect("calls.db") as conn:
+        async with aiosqlite.connect(self.db_path) as conn:
             conn.row_factory = aiosqlite.Row
             # 总数
             cursor = await conn.execute(f"SELECT COUNT(*) as cnt FROM calls{where_clause}", params)
@@ -579,7 +694,7 @@ class ProxyServer:
             return _ui_unauthorized_json()
         call_id = request.match_info["call_id"]
 
-        async with aiosqlite.connect("calls.db") as conn:
+        async with aiosqlite.connect(self.db_path) as conn:
             conn.row_factory = aiosqlite.Row
             cursor = await conn.execute("SELECT * FROM calls WHERE call_id = ?", (call_id,))
             row = await cursor.fetchone()
@@ -608,7 +723,7 @@ class ProxyServer:
             return _ui_unauthorized_json()
         call_id = request.match_info["call_id"]
 
-        async with aiosqlite.connect("calls.db") as conn:
+        async with aiosqlite.connect(self.db_path) as conn:
             conn.row_factory = aiosqlite.Row
             cursor = await conn.execute("SELECT raw_path FROM calls WHERE call_id = ?", (call_id,))
             row = await cursor.fetchone()
@@ -633,7 +748,7 @@ class ProxyServer:
         """统计概览 API"""
         if not verify_ui_auth(request, self.config):
             return _ui_unauthorized_json()
-        async with aiosqlite.connect("calls.db") as conn:
+        async with aiosqlite.connect(self.db_path) as conn:
             conn.row_factory = aiosqlite.Row
 
             # 按 host 统计

@@ -283,7 +283,17 @@ LLM_TAP_DATA_DIR=/path/to/llm-tap-data python3 tray_app.py
 
 ```json
 {
-  "ui_tokens": ["change-me"]
+  "ui_tokens": ["change-me"],
+  "upstream_conn_limit": 1000,
+  "upstream_conn_limit_per_host": 0,
+  "upstream_dns_cache_ttl": 300,
+  "upstream_keepalive_timeout": 30,
+  "save_queue_max": 1000,
+  "save_batch_size": 20,
+  "capture_max_bytes": 67108864,
+  "stream_capture_max_bytes": 67108864,
+  "request_max_bytes": 8000000,
+  "pretty_json": false
 }
 ```
 
