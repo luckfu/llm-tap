@@ -197,6 +197,22 @@ python export_harness_dataset.py inspect --preview 3
 python export_harness_dataset.py export --out exports/harness.jsonl
 ```
 
+导出 ShareGPT JSON：
+
+```bash
+python export_harness_dataset.py export --format sharegpt --out data/sharegpt.json
+```
+
+ShareGPT 默认只输出 `id` 和 `conversations`。如果样本包含工具，导出器会在 `system` 轮次中注入 `<tools>...</tools>` 工具定义，并用 `<tool_call>` / `<tool_result>` 保留工具调用轨迹。可用 `--no-tools` 关闭工具定义注入；如需调试或溯源，可额外加 `--include-metadata`。
+
+导出结构化工具调用 SFT JSONL（推荐用于支持 tool/function calling 的训练框架）：
+
+```bash
+python export_harness_dataset.py export --format tool_sft --out data/tool_sft.jsonl
+```
+
+`tool_sft` 每行包含顶层 `tools` 和 `messages`，其中 `messages` 保留 `assistant.tool_calls`、`role=tool`、`tool_call_id`，以及可用时的 `assistant.reasoning_content`。
+
 默认读取桌面应用数据目录 `~/.llm-tap/calls.db`。如果要读取当前目录的开发数据库：
 
 ```bash

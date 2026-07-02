@@ -65,6 +65,14 @@ def dump_jsonl(path: str, rows: Iterable[Dict[str, Any]]) -> int:
     return count
 
 
+def dump_json_array(path: str, rows: Iterable[Dict[str, Any]]) -> int:
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    data = list(rows)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    return len(data)
+
+
 def text_from_content_parts(parts: Any) -> str:
     if isinstance(parts, str):
         return parts
@@ -89,6 +97,51 @@ def text_from_content_parts(parts: Any) -> str:
 def compact_raw(obj: Dict[str, Any], drop_keys: Iterable[str] = ()) -> Dict[str, Any]:
     drops = set(drop_keys)
     return {k: v for k, v in obj.items() if k not in drops}
+
+
+def normalize_tool_definition(tool: Dict[str, Any]) -> Dict[str, Any]:
+    if isinstance(tool.get("function"), dict):
+        fn = tool.get("function") or {}
+        return {
+            "type": tool.get("type") or "function",
+            "name": fn.get("name"),
+            "description": fn.get("description"),
+            "parameters": fn.get("parameters"),
+            "raw": tool,
+        }
+    return {
+        "type": tool.get("type") or "function",
+        "name": tool.get("name"),
+        "description": tool.get("description"),
+        "parameters": tool.get("parameters"),
+        "raw": tool,
+    }
+
+
+def tool_definition_for_training(tool: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "type": tool.get("type") or "function",
+        "function": {
+            "name": tool.get("name"),
+            "description": tool.get("description") or "",
+            "parameters": tool.get("parameters") or {"type": "object", "properties": {}},
+        },
+    }
+
+
+def normalize_tool_definitions(request: Dict[str, Any]) -> List[Dict[str, Any]]:
+    tools = request.get("tools")
+    if not isinstance(tools, list):
+        return []
+    return [normalize_tool_definition(tool) for tool in tools if isinstance(tool, dict)]
+
+
+def as_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, ensure_ascii=False, indent=2)
 
 
 def normalize_chat_message(message: Dict[str, Any]) -> Dict[str, Any]:
@@ -336,6 +389,7 @@ def build_episode(
             ) or (response.get("previous_response_id") if isinstance(response, dict) else None),
         },
         "harness": extract_harness(messages, request if isinstance(request, dict) else {}),
+        "tools": normalize_tool_definitions(request if isinstance(request, dict) else {}),
         "messages": messages,
         "labels": {
             "protocol": protocol,
@@ -464,6 +518,282 @@ def export_dataset(db_path: str, out_path: str, limit: Optional[int] = None, inc
     return {
         "db_path": db_path,
         "out_path": out_path,
+        "format": "canonical",
+        "exported": exported,
+        "written": written,
+        "skipped": dict(skipped),
+    }
+
+
+def sharegpt_from_episode(
+    episode: Dict[str, Any],
+    include_metadata: bool = False,
+    include_tools: bool = True,
+) -> Optional[Dict[str, Any]]:
+    conversations: List[Dict[str, str]] = []
+    role_map = {
+        "system": "system",
+        "developer": "system",
+        "user": "human",
+        "assistant": "gpt",
+        "tool": "observation",
+    }
+
+    tools = episode.get("tools") or []
+    if include_tools and tools:
+        tool_defs = [
+            compact_raw(tool, drop_keys=("raw",))
+            for tool in tools
+        ]
+        conversations.append({
+            "from": "system",
+            "value": "<tools>\n" + json.dumps(tool_defs, ensure_ascii=False, indent=2) + "\n</tools>",
+        })
+
+    for message in episode.get("messages") or []:
+        message_type = message.get("type")
+        role = message.get("role")
+        from_role = role_map.get(role, role or "unknown")
+        value = ""
+
+        if message_type == "tool_call":
+            blocks = []
+            for tool_call in message.get("tool_calls") or []:
+                fn = tool_call.get("function") or {}
+                name = fn.get("name") or tool_call.get("type") or "tool"
+                args = as_text(fn.get("arguments"))
+                blocks.append(f"<tool_call name=\"{name}\">\n{args}\n</tool_call>")
+            value = "\n\n".join(blocks)
+            from_role = "gpt"
+        elif message_type == "tool_result":
+            name = message.get("name") or "tool"
+            content = as_text(message.get("content"))
+            value = f"<tool_result name=\"{name}\">\n{content}\n</tool_result>"
+            from_role = "observation"
+        elif message_type == "reasoning":
+            summary = as_text(message.get("summary"))
+            if summary:
+                value = f"<reasoning>\n{summary}\n</reasoning>"
+                from_role = "gpt"
+        else:
+            content = as_text(message.get("content"))
+            reasoning = as_text(message.get("reasoning"))
+            if reasoning and role == "assistant":
+                value = f"<reasoning>\n{reasoning}\n</reasoning>"
+                if content:
+                    value += "\n\n" + content
+            else:
+                value = content
+
+            if message.get("tool_calls"):
+                blocks = []
+                for tool_call in message.get("tool_calls") or []:
+                    fn = tool_call.get("function") or {}
+                    name = fn.get("name") or tool_call.get("type") or "tool"
+                    args = as_text(fn.get("arguments"))
+                    blocks.append(f"<tool_call name=\"{name}\">\n{args}\n</tool_call>")
+                value = "\n\n".join([v for v in [value, "\n\n".join(blocks)] if v])
+
+        if value:
+            conversations.append({"from": from_role, "value": value})
+
+    if not conversations:
+        return None
+
+    item = {
+        "id": episode.get("id"),
+        "conversations": conversations,
+    }
+    if include_metadata:
+        item["metadata"] = {
+            "schema": "llm-tap.sharegpt.v1",
+            "source": episode.get("source"),
+            "harness": episode.get("harness"),
+            "tools": episode.get("tools"),
+            "labels": episode.get("labels"),
+            "stats": episode.get("stats"),
+        }
+    return item
+
+
+def export_sharegpt_dataset(
+    db_path: str,
+    out_path: str,
+    limit: Optional[int] = None,
+    include_skipped: bool = False,
+    include_metadata: bool = False,
+    include_tools: bool = True,
+) -> Dict[str, Any]:
+    exported = 0
+    skipped = Counter()
+
+    def rows():
+        nonlocal exported
+        for row, episode, error in iter_episodes(db_path, limit=limit):
+            if error:
+                skipped[error] += 1
+                continue
+            assert episode is not None
+            if episode["quality"]["skip"] and not include_skipped:
+                skipped[episode["quality"]["skip_reason"]] += 1
+                continue
+            item = sharegpt_from_episode(
+                episode,
+                include_metadata=include_metadata,
+                include_tools=include_tools,
+            )
+            if item is None:
+                skipped["empty_sharegpt_conversation"] += 1
+                continue
+            exported += 1
+            yield item
+
+    written = dump_json_array(out_path, rows())
+    return {
+        "db_path": db_path,
+        "out_path": out_path,
+        "format": "sharegpt",
+        "include_metadata": include_metadata,
+        "include_tools": include_tools,
+        "exported": exported,
+        "written": written,
+        "skipped": dict(skipped),
+    }
+
+
+def tool_sft_message_from_episode_message(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    message_type = message.get("type")
+    role = message.get("role")
+
+    if message_type == "reasoning":
+        summary = message.get("summary")
+        if not summary:
+            return None
+        return {
+            "role": "assistant",
+            "reasoning_content": as_text(summary),
+        }
+
+    if message_type == "tool_call":
+        tool_calls = []
+        for tool_call in message.get("tool_calls") or []:
+            fn = tool_call.get("function") or {}
+            arguments = fn.get("arguments")
+            if not isinstance(arguments, str):
+                arguments = json.dumps(arguments if arguments is not None else {}, ensure_ascii=False)
+            tool_calls.append({
+                "id": tool_call.get("id"),
+                "type": "function",
+                "function": {
+                    "name": fn.get("name"),
+                    "arguments": arguments,
+                },
+            })
+        if not tool_calls:
+            return None
+        return {"role": "assistant", "tool_calls": tool_calls}
+
+    if message_type == "tool_result" or role == "tool":
+        return {
+            "role": "tool",
+            "tool_call_id": message.get("tool_call_id"),
+            "content": as_text(message.get("content")),
+        }
+
+    if role not in {"system", "developer", "user", "assistant", "tool"}:
+        return None
+
+    out: Dict[str, Any] = {"role": role}
+    reasoning = as_text(message.get("reasoning"))
+    if role == "assistant" and reasoning:
+        out["reasoning_content"] = reasoning
+    content = as_text(message.get("content"))
+    if content:
+        out["content"] = content
+
+    tool_calls = []
+    for tool_call in message.get("tool_calls") or []:
+        fn = tool_call.get("function") or {}
+        arguments = fn.get("arguments")
+        if not isinstance(arguments, str):
+            arguments = json.dumps(arguments if arguments is not None else {}, ensure_ascii=False)
+        tool_calls.append({
+            "id": tool_call.get("id"),
+            "type": "function",
+            "function": {
+                "name": fn.get("name"),
+                "arguments": arguments,
+            },
+        })
+    if tool_calls:
+        out["tool_calls"] = tool_calls
+
+    if role == "assistant" and not out.get("content") and not out.get("tool_calls") and not out.get("reasoning_content"):
+        return None
+    if role in {"system", "developer", "user"} and not out.get("content"):
+        return None
+    return out
+
+
+def tool_sft_from_episode(episode: Dict[str, Any], include_metadata: bool = False) -> Optional[Dict[str, Any]]:
+    messages: List[Dict[str, Any]] = []
+    for message in episode.get("messages") or []:
+        converted = tool_sft_message_from_episode_message(message)
+        if converted:
+            messages.append(converted)
+
+    if not messages:
+        return None
+
+    item: Dict[str, Any] = {
+        "tools": [tool_definition_for_training(tool) for tool in episode.get("tools") or []],
+        "messages": messages,
+    }
+    if include_metadata:
+        item["metadata"] = {
+            "id": episode.get("id"),
+            "schema": "llm-tap.tool_sft.v1",
+            "source": episode.get("source"),
+            "harness": episode.get("harness"),
+            "labels": episode.get("labels"),
+            "stats": episode.get("stats"),
+        }
+    return item
+
+
+def export_tool_sft_dataset(
+    db_path: str,
+    out_path: str,
+    limit: Optional[int] = None,
+    include_skipped: bool = False,
+    include_metadata: bool = False,
+) -> Dict[str, Any]:
+    exported = 0
+    skipped = Counter()
+
+    def rows():
+        nonlocal exported
+        for row, episode, error in iter_episodes(db_path, limit=limit):
+            if error:
+                skipped[error] += 1
+                continue
+            assert episode is not None
+            if episode["quality"]["skip"] and not include_skipped:
+                skipped[episode["quality"]["skip_reason"]] += 1
+                continue
+            item = tool_sft_from_episode(episode, include_metadata=include_metadata)
+            if item is None:
+                skipped["empty_tool_sft_messages"] += 1
+                continue
+            exported += 1
+            yield item
+
+    written = dump_jsonl(out_path, rows())
+    return {
+        "db_path": db_path,
+        "out_path": out_path,
+        "format": "tool_sft",
+        "include_metadata": include_metadata,
         "exported": exported,
         "written": written,
         "skipped": dict(skipped),
@@ -484,9 +814,12 @@ def main() -> None:
     inspect_p.add_argument("--preview", type=int, default=3, help="Number of episode previews")
     inspect_p.add_argument("--limit", type=int, default=None, help="Limit number of calls read")
 
-    export_p = sub.add_parser("export", help="Export canonical JSONL")
+    export_p = sub.add_parser("export", help="Export dataset")
     export_p.add_argument("--out", required=True, help="Output JSONL path")
+    export_p.add_argument("--format", choices=["canonical", "sharegpt", "tool_sft"], default="canonical")
     export_p.add_argument("--include-skipped", action="store_true", help="Include low-quality/skipped episodes")
+    export_p.add_argument("--include-metadata", action="store_true", help="Include metadata in ShareGPT output")
+    export_p.add_argument("--no-tools", action="store_true", help="Do not inject tool definitions into ShareGPT system turns")
     export_p.add_argument("--limit", type=int, default=None, help="Limit number of calls read")
 
     args = parser.parse_args()
@@ -495,7 +828,26 @@ def main() -> None:
     if args.command == "inspect":
         print_json(inspect_dataset(db_path, limit=args.limit, preview=args.preview))
     elif args.command == "export":
-        print_json(export_dataset(db_path, args.out, limit=args.limit, include_skipped=args.include_skipped))
+        if args.format == "sharegpt":
+            result = export_sharegpt_dataset(
+                db_path,
+                args.out,
+                limit=args.limit,
+                include_skipped=args.include_skipped,
+                include_metadata=args.include_metadata,
+                include_tools=not args.no_tools,
+            )
+        elif args.format == "tool_sft":
+            result = export_tool_sft_dataset(
+                db_path,
+                args.out,
+                limit=args.limit,
+                include_skipped=args.include_skipped,
+                include_metadata=args.include_metadata,
+            )
+        else:
+            result = export_dataset(db_path, args.out, limit=args.limit, include_skipped=args.include_skipped)
+        print_json(result)
 
 
 if __name__ == "__main__":

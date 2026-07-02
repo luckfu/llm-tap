@@ -197,6 +197,22 @@ Export canonical JSONL:
 python export_harness_dataset.py export --out exports/harness.jsonl
 ```
 
+Export ShareGPT JSON:
+
+```bash
+python export_harness_dataset.py export --format sharegpt --out data/sharegpt.json
+```
+
+ShareGPT output includes only `id` and `conversations` by default. When an episode has tools, the exporter injects tool definitions as a `system` turn wrapped in `<tools>...</tools>`, and preserves tool trajectories with `<tool_call>` / `<tool_result>` blocks. Use `--no-tools` to disable tool definition injection. Add `--include-metadata` only for debugging or traceability.
+
+Export structured tool-call SFT JSONL, recommended for training frameworks that support tool/function calling:
+
+```bash
+python export_harness_dataset.py export --format tool_sft --out data/tool_sft.jsonl
+```
+
+Each `tool_sft` line has top-level `tools` and `messages`; `messages` preserves `assistant.tool_calls`, `role=tool`, `tool_call_id`, and `assistant.reasoning_content` when available.
+
 By default, the exporter reads the desktop app database at `~/.llm-tap/calls.db`. To inspect the development database in the current directory:
 
 ```bash

@@ -584,6 +584,7 @@ INDEX_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <title>数据采集管理</title>
+<link rel="icon" type="image/svg+xml" href='data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"%3E%3Cdefs%3E%3ClinearGradient id="g" x1="0" y1="0" x2="0" y2="1"%3E%3Cstop offset="0" stop-color="%23a0e1f0"/%3E%3Cstop offset="1" stop-color="%231e7daa"/%3E%3C/linearGradient%3E%3C/defs%3E%3Cpath fill="url(%23g)" d="M32 5C24 17 15 27 15 40c0 10 8 18 17 18s17-8 17-18C49 27 40 17 32 5z"/%3E%3Cellipse cx="26" cy="34" rx="6" ry="9" fill="white" opacity=".35" transform="rotate(24 26 34)"/%3E%3C/svg%3E'>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body { font-family: -apple-system, sans-serif; background: #f5f5f5; color: #333; }
@@ -623,11 +624,13 @@ tr:hover { background: #f8f9fa; cursor: pointer; }
 .modal { background: #fff; border-radius: 8px; width: 100%; max-width: 1000px; max-height: 90vh; overflow: hidden; display: flex; flex-direction: column; }
 .modal-header { padding: 16px 24px; border-bottom: 1px solid #e0e0e0; display: flex; justify-content: space-between; align-items: center; }
 .modal-header h2 { font-size: 16px; }
-.modal-actions { display: flex; align-items: center; gap: 12px; }
+.modal-title-group { display: flex; align-items: center; gap: 16px; min-width: 0; }
 .modal-close { font-size: 24px; cursor: pointer; color: #999; }
+.modal-close:hover { color: #333; }
 .modal-body { overflow-y: auto; padding: 24px; }
 .detail-section { margin-bottom: 24px; }
-.detail-section h3 { font-size: 14px; color: #888; margin-bottom: 8px; text-transform: uppercase; }
+.detail-section summary { font-size: 14px; color: #666; margin-bottom: 8px; text-transform: uppercase; cursor: pointer; user-select: none; font-weight: 600; }
+.detail-section summary:hover { color: #1a1a2e; }
 .detail-section pre { background: #f8f9fa; padding: 16px; border-radius: 6px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
 .tag { display: inline-block; background: #e9ecef; padding: 2px 8px; border-radius: 4px; font-size: 12px; margin-right: 4px; }
 </style>
@@ -698,11 +701,11 @@ tr:hover { background: #f8f9fa; cursor: pointer; }
 <div class="modal-overlay" id="modal" onclick="if(event.target===this)closeModal()">
   <div class="modal">
     <div class="modal-header">
-      <h2 id="modal-title" data-i18n="callDetail">调用详情</h2>
-      <div class="modal-actions">
+      <div class="modal-title-group">
+        <h2 id="modal-title" data-i18n="callDetail">调用详情</h2>
         <button id="modal-delete-btn" class="danger-btn" onclick="deleteCall(event, currentDetailCallId, true)" data-i18n="delete">删除</button>
-        <span class="modal-close" onclick="closeModal()">&times;</span>
       </div>
+      <span class="modal-close" onclick="closeModal()">&times;</span>
     </div>
     <div class="modal-body" id="modal-body"></div>
   </div>
@@ -849,11 +852,14 @@ async function showDetail(callId) {
   // breaks the <pre> block and messes up the modal layout.
   function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
   function preBlock(obj) { return '<pre>' + esc(JSON.stringify(obj, null, 2)) + '</pre>'; }
+  function detailBlock(title, obj, open) {
+    return '<details class="detail-section"'+(open ? ' open' : '')+'><summary>'+title+'</summary>' + preBlock(obj) + '</details>';
+  }
   let html = '';
-  html += '<div class="detail-section"><h3>'+t('metadata')+'</h3>' + preBlock(meta) + '</div>';
-  if (call.request) html += '<div class="detail-section"><h3>'+t('request')+'</h3>' + preBlock(call.request) + '</div>';
-  if (call.response) html += '<div class="detail-section"><h3>'+t('response')+'</h3>' + preBlock(call.response) + '</div>';
-  if (call.headers) html += '<div class="detail-section"><h3>'+t('headersSanitized')+'</h3>' + preBlock(call.headers) + '</div>';
+  html += detailBlock(t('metadata'), meta, false);
+  if (call.request) html += detailBlock(t('request'), call.request, false);
+  if (call.response) html += detailBlock(t('response'), call.response, true);
+  if (call.headers) html += detailBlock(t('headersSanitized'), call.headers, false);
   document.getElementById('modal-body').innerHTML = html;
   document.getElementById('modal').classList.add('show');
 }
