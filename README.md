@@ -187,6 +187,8 @@ Anthropic's `thinking` block (with `signature`), `tool_use` block, `tool_result`
 
 `export_harness_dataset.py` converts raw calls into a provider-neutral agent harness trajectory JSONL format. The canonical format preserves messages, tool calls, tool results, reasoning, harness metadata, and raw protocol fragments so it can later be compiled to OpenAI, ShareGPT, ChatML, TRL, LLaMA-Factory, or other training formats.
 
+For the full export design, processing rules, sliding-window strategy, and parameter reference, see [Dataset Export Design](docs/dataset-export.md).
+
 Inspect exportable data:
 
 ```bash
@@ -223,6 +225,14 @@ python export_harness_dataset.py export --format openai --out data/openai_finetu
 
 Each `openai` line is a `{"messages":[...]}` object. The exporter maps `developer` to `system`, merges standalone Responses `reasoning` into the next `assistant.content` as `<think>...</think>`, combines adjacent tool calls into one `assistant.tool_calls` array, and always serializes `function.arguments` as a JSON string.
 
+Export OpenAI sliding-window fine-tuning JSONL, experimental and budgeted at 4096 estimated tokens by default:
+
+```bash
+python export_harness_dataset.py export --format openai_windowed --max-seq-len 4096 --out data/openai_windowed.jsonl
+```
+
+`openai_windowed` splits a long trajectory into multiple examples. Each example targets one `assistant` message, while preserving a fixed prefix and as much recent history as fits. Because the exporter does not know the final training model's tokenizer, the window budget uses a heuristic `JSON characters / --chars-per-token` estimate by default; `--chars-per-token` defaults to `4.0`. If the system prompt is too long, the exporter compacts the `system` prefix according to `--prefix-budget-ratio` so recent history and the target assistant message still have budget.
+
 By default, the exporter reads the desktop app database at `~/.llm-tap/calls.db`. To inspect the development database in the current directory:
 
 ```bash
@@ -249,11 +259,14 @@ Global options:
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--out PATH` | required | Output file path. Prefer writing under `data/`, for example `data/openai_finetune.jsonl`. |
-| `--format FORMAT` | `canonical` | Export format. Choices: `canonical`, `sharegpt`, `tool_sft`, `openai`. |
+| `--format FORMAT` | `canonical` | Export format. Choices: `canonical`, `sharegpt`, `tool_sft`, `openai`, `openai_windowed`. |
 | `--limit N` | unlimited | Export only the first N calls. Put it after `export`, for example `export --limit 100`. |
 | `--include-skipped` | off | By default, low-quality examples such as calls without assistant output are skipped; enable this to write them anyway. |
 | `--include-metadata` | off | Adds source, model, harness, labels, and stats in supported formats. Useful for debugging and traceability; usually unnecessary for training. |
 | `--no-tools` | off | Applies only to `sharegpt`. Disables `<tools>...</tools>` tool definition injection while preserving tool call/result text trajectories. |
+| `--max-seq-len N` | `4096` | Applies only to `openai_windowed`. Maximum estimated window length. |
+| `--chars-per-token N` | `4.0` | Applies only to `openai_windowed`. Estimates tokens as `JSON characters / N` when no tokenizer is available; smaller values are more conservative. |
+| `--prefix-budget-ratio N` | `0.45` | Applies only to `openai_windowed`. Maximum fraction of the window budget reserved for the fixed prefix, preventing long system prompts from crowding out history. |
 
 Format summary:
 
@@ -263,6 +276,7 @@ Format summary:
 | `sharegpt` | JSON array | ShareGPT-style conversation format; tool trajectories are serialized into XML-like text tags. |
 | `tool_sft` | JSONL | For training frameworks that support structured tool calling; preserves top-level `tools` and message-level `tool_calls`. |
 | `openai` | JSONL | OpenAI Chat Completions fine-tuning format. Each line is `{"messages":[...]}` for OpenAI-format-compatible data loaders. |
+| `openai_windowed` | JSONL | Sliding-window long-trajectory examples in OpenAI format. Each line is still `{"messages":[...]}`, with the final assistant message as the current training target. |
 
 ## Project Structure
 

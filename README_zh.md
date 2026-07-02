@@ -187,6 +187,8 @@ Anthropic 协议的 `thinking` block（含 `signature`）、`tool_use` block、`
 
 `export_harness_dataset.py` 可以把原始调用转换为通用的 agent harness trajectory JSONL。该格式不绑定 OpenAI，保留 message、tool call、tool result、reasoning、harness 元数据和原始片段，后续可再编译为 OpenAI、ShareGPT、ChatML、TRL、LLaMA-Factory 等训练框架格式。
 
+完整的导出原理、处理方法、滑窗策略和参数说明见 [训练数据导出设计](docs/dataset-export.md)。
+
 先检查可导出数据：
 
 ```bash
@@ -223,6 +225,14 @@ python export_harness_dataset.py export --format openai --out data/openai_finetu
 
 `openai` 每行是一个 `{"messages":[...]}` 对象。导出器会把 `developer` 映射为 `system`，把 Responses 里的独立 `reasoning` 合并进下一条 `assistant.content` 的 `<think>...</think>`，把连续工具调用合并为同一个 `assistant.tool_calls` 数组，并确保 `function.arguments` 始终是 JSON 字符串。
 
+导出 OpenAI 滑动窗口微调 JSONL（实验性，默认按 4096 估算 token 预算）：
+
+```bash
+python export_harness_dataset.py export --format openai_windowed --max-seq-len 4096 --out data/openai_windowed.jsonl
+```
+
+`openai_windowed` 会把一条长轨迹切成多条样本，每条样本以一个 `assistant` 消息作为训练目标，保留固定前缀和尽量近的历史轨迹。由于导出器不知道最终被训练模型的 tokenizer，窗口预算默认使用 `JSON 字符数 / --chars-per-token` 的启发式估算，`--chars-per-token` 默认是 `4.0`。如果系统提示过长，导出器会按 `--prefix-budget-ratio` 压缩 `system` 前缀，给最近历史和目标 assistant 留预算。
+
 默认读取桌面应用数据目录 `~/.llm-tap/calls.db`。如果要读取当前目录的开发数据库：
 
 ```bash
@@ -249,11 +259,14 @@ python export_harness_dataset.py --db calls.db inspect
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
 | `--out PATH` | 必填 | 输出文件路径。建议写到 `data/` 下，例如 `data/openai_finetune.jsonl`。 |
-| `--format FORMAT` | `canonical` | 导出格式。可选：`canonical`、`sharegpt`、`tool_sft`、`openai`。 |
+| `--format FORMAT` | `canonical` | 导出格式。可选：`canonical`、`sharegpt`、`tool_sft`、`openai`、`openai_windowed`。 |
 | `--limit N` | 不限制 | 只导出前 N 条调用；参数写在 `export` 后面，例如 `export --limit 100`。 |
 | `--include-skipped` | 关闭 | 默认跳过没有 assistant 输出等低质量样本；打开后会把这些样本也写出。 |
 | `--include-metadata` | 关闭 | 在支持的格式中额外写入源文件、模型、harness、标签和统计信息，主要用于调试溯源；正式训练通常不需要。 |
 | `--no-tools` | 关闭 | 仅对 `sharegpt` 生效。关闭 `<tools>...</tools>` 工具定义注入，但仍会保留工具调用/工具结果文本轨迹。 |
+| `--max-seq-len N` | `4096` | 仅对 `openai_windowed` 生效。窗口最大估算长度。 |
+| `--chars-per-token N` | `4.0` | 仅对 `openai_windowed` 生效。无 tokenizer 时用 `JSON 字符数 / N` 估算 token，数值越小越保守。 |
+| `--prefix-budget-ratio N` | `0.45` | 仅对 `openai_windowed` 生效。固定前缀最多占窗口预算的比例，避免超长 system prompt 挤掉历史。 |
 
 格式说明：
 
@@ -263,6 +276,7 @@ python export_harness_dataset.py --db calls.db inspect
 | `sharegpt` | JSON 数组 | ShareGPT/对话微调格式，工具轨迹会以 XML 风格标签写入文本。 |
 | `tool_sft` | JSONL | 面向支持结构化工具调用的训练框架，保留顶层 `tools` 和消息内 `tool_calls`。 |
 | `openai` | JSONL | OpenAI Chat Completions 微调格式，每行是 `{"messages":[...]}`，适合直接给 OpenAI 格式兼容的数据加载器。 |
+| `openai_windowed` | JSONL | OpenAI 格式的长轨迹滑窗样本，每行仍是 `{"messages":[...]}`，最后一条 assistant 是当前训练目标。 |
 
 ## 项目结构
 

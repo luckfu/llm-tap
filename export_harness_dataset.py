@@ -8,7 +8,9 @@ or tool-SFT formats without rereading the raw capture files.
 """
 
 import argparse
+import copy
 import json
+import math
 import os
 import sqlite3
 from collections import Counter, defaultdict
@@ -994,6 +996,306 @@ def export_openai_dataset(
     }
 
 
+def estimate_openai_message_units(message: Dict[str, Any], chars_per_token: float = 4.0) -> int:
+    chars = len(json.dumps(message, ensure_ascii=False, separators=(",", ":")))
+    return max(1, int(math.ceil(chars / max(chars_per_token, 0.1))))
+
+
+def estimate_openai_messages_units(messages: List[Dict[str, Any]], chars_per_token: float = 4.0) -> int:
+    if not messages:
+        return 1
+    return sum(estimate_openai_message_units(message, chars_per_token) for message in messages) + len(messages) + 1
+
+
+def flatten_message_groups(groups: List[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+    messages: List[Dict[str, Any]] = []
+    for group in groups:
+        messages.extend(group)
+    return messages
+
+
+def openai_history_groups(
+    messages: List[Dict[str, Any]],
+    start: int,
+    end: int,
+) -> List[List[Dict[str, Any]]]:
+    groups: List[List[Dict[str, Any]]] = []
+    idx = start
+    while idx < end:
+        message = messages[idx]
+        if message.get("role") != "assistant":
+            groups.append([message])
+            idx += 1
+            continue
+
+        group = [message]
+        idx += 1
+        tool_calls = message.get("tool_calls") or []
+        tool_call_ids = {tool_call.get("id") for tool_call in tool_calls if tool_call.get("id")}
+        while idx < end and messages[idx].get("role") == "tool":
+            tool_call_id = messages[idx].get("tool_call_id")
+            if tool_call_ids and tool_call_id and tool_call_id not in tool_call_ids:
+                break
+            group.append(messages[idx])
+            idx += 1
+        groups.append(group)
+    return groups
+
+
+def compact_group_to_budget(
+    group: List[Dict[str, Any]],
+    max_units: int,
+    chars_per_token: float = 4.0,
+) -> Optional[List[Dict[str, Any]]]:
+    if estimate_openai_messages_units(group, chars_per_token) <= max_units:
+        return copy.deepcopy(group)
+
+    compacted = copy.deepcopy(group)
+    tool_indexes = [
+        idx for idx, message in enumerate(compacted)
+        if message.get("role") == "tool" and isinstance(message.get("content"), str)
+    ]
+    if not tool_indexes:
+        return None
+
+    original_content = compacted[tool_indexes[-1]].get("content") or ""
+    for idx in tool_indexes:
+        compacted[idx]["content"] = ""
+    if estimate_openai_messages_units(compacted, chars_per_token) > max_units:
+        return None
+
+    marker = "[...truncated...]\n"
+    best = copy.deepcopy(compacted)
+    low = 0
+    high = len(original_content)
+    while low <= high:
+        mid = (low + high) // 2
+        candidate = copy.deepcopy(compacted)
+        if mid >= len(original_content):
+            content = original_content
+        else:
+            suffix = original_content[-mid:] if mid else ""
+            content = marker + suffix if suffix else ""
+        candidate[tool_indexes[-1]]["content"] = content
+        if estimate_openai_messages_units(candidate, chars_per_token) <= max_units:
+            best = candidate
+            low = mid + 1
+        else:
+            high = mid - 1
+    return best
+
+
+def compact_prefix_to_budget(
+    prefix: List[Dict[str, Any]],
+    target: List[Dict[str, Any]],
+    max_units: int,
+    chars_per_token: float = 4.0,
+) -> Tuple[Optional[List[Dict[str, Any]]], bool]:
+    if estimate_openai_messages_units(prefix + target, chars_per_token) <= max_units:
+        return copy.deepcopy(prefix), False
+
+    compacted = copy.deepcopy(prefix)
+    system_indexes = [
+        idx for idx, message in enumerate(compacted)
+        if message.get("role") == "system" and isinstance(message.get("content"), str)
+    ]
+    if not system_indexes:
+        return None, False
+
+    original_content = {idx: compacted[idx].get("content") or "" for idx in system_indexes}
+    for idx in system_indexes:
+        compacted[idx]["content"] = ""
+    if estimate_openai_messages_units(compacted + target, chars_per_token) > max_units:
+        return None, True
+
+    marker = "\n[...system truncated for window budget...]"
+    for idx in system_indexes:
+        source = original_content[idx]
+        low = 0
+        high = len(source)
+        best_content = ""
+        while low <= high:
+            mid = (low + high) // 2
+            if mid >= len(source):
+                content = source
+            else:
+                content = source[:mid] + marker if mid else ""
+            candidate = copy.deepcopy(compacted)
+            candidate[idx]["content"] = content
+            if estimate_openai_messages_units(candidate + target, chars_per_token) <= max_units:
+                best_content = content
+                low = mid + 1
+            else:
+                high = mid - 1
+        compacted[idx]["content"] = best_content
+
+    return compacted, True
+
+
+def openai_windowed_from_episode(
+    episode: Dict[str, Any],
+    *,
+    max_seq_len: int = 4096,
+    chars_per_token: float = 4.0,
+    prefix_budget_ratio: float = 0.45,
+    include_metadata: bool = False,
+) -> Tuple[List[Dict[str, Any]], Counter]:
+    skipped = Counter()
+    item = openai_from_episode(episode, include_metadata=False)
+    if item is None:
+        skipped["empty_openai_messages"] += 1
+        return [], skipped
+
+    messages = item.get("messages") or []
+    first_assistant_idx = next(
+        (idx for idx, message in enumerate(messages) if message.get("role") == "assistant"),
+        None,
+    )
+    if first_assistant_idx is None:
+        skipped["no_assistant_target"] += 1
+        return [], skipped
+
+    prefix = copy.deepcopy(messages[:first_assistant_idx])
+    windows: List[Dict[str, Any]] = []
+
+    for target_idx, target_message in enumerate(messages):
+        if target_message.get("role") != "assistant":
+            continue
+        if not target_message.get("content") and not target_message.get("tool_calls"):
+            skipped["empty_assistant_target"] += 1
+            continue
+
+        target = [copy.deepcopy(target_message)]
+        target_units = estimate_openai_messages_units(target, chars_per_token)
+        if target_units >= max_seq_len:
+            skipped["target_exceeds_max_seq_len"] += 1
+            continue
+
+        prefix_budget = min(
+            max_seq_len - target_units,
+            max(1, int(max_seq_len * max(0.0, min(prefix_budget_ratio, 1.0)))),
+        )
+        compacted_prefix, prefix_compacted = compact_prefix_to_budget(
+            prefix,
+            [],
+            prefix_budget,
+            chars_per_token,
+        )
+        if compacted_prefix is None:
+            skipped["prefix_target_exceeds_max_seq_len"] += 1
+            continue
+        if estimate_openai_messages_units(compacted_prefix + target, chars_per_token) > max_seq_len:
+            skipped["prefix_target_exceeds_max_seq_len"] += 1
+            continue
+
+        selected_reversed: List[List[Dict[str, Any]]] = []
+        groups = openai_history_groups(messages, first_assistant_idx, target_idx)
+        for group in reversed(groups):
+            selected = flatten_message_groups(list(reversed(selected_reversed)))
+            candidate_messages = compacted_prefix + flatten_message_groups([copy.deepcopy(group)]) + selected + target
+            if estimate_openai_messages_units(candidate_messages, chars_per_token) <= max_seq_len:
+                selected_reversed.append(copy.deepcopy(group))
+                continue
+
+            current_messages = compacted_prefix + selected + target
+            remaining = max_seq_len - estimate_openai_messages_units(current_messages, chars_per_token)
+            compacted = compact_group_to_budget(group, remaining, chars_per_token)
+            if compacted:
+                candidate_messages = compacted_prefix + compacted + selected + target
+                if estimate_openai_messages_units(candidate_messages, chars_per_token) <= max_seq_len:
+                    selected_reversed.append(compacted)
+            break
+
+        history = flatten_message_groups(list(reversed(selected_reversed)))
+        window_messages = compacted_prefix + history + target
+        window: Dict[str, Any] = {"messages": window_messages}
+        if include_metadata:
+            window["metadata"] = {
+                "id": episode.get("id"),
+                "schema": "llm-tap.openai_chat_windowed.v1",
+                "source": episode.get("source"),
+                "window": {
+                    "target_message_index": target_idx,
+                    "max_seq_len": max_seq_len,
+                    "estimated_units": estimate_openai_messages_units(window_messages, chars_per_token),
+                    "estimate_mode": "json_char_count_divisor",
+                    "chars_per_token": chars_per_token,
+                    "prefix_budget_ratio": prefix_budget_ratio,
+                    "prefix_budget_units": prefix_budget,
+                    "history_message_count": len(history),
+                    "prefix_message_count": len(compacted_prefix),
+                    "prefix_compacted": prefix_compacted,
+                },
+            }
+        windows.append(window)
+
+    if not windows:
+        skipped["empty_openai_windows"] += 1
+    return windows, skipped
+
+
+def export_openai_windowed_dataset(
+    db_path: str,
+    out_path: str,
+    limit: Optional[int] = None,
+    include_skipped: bool = False,
+    include_metadata: bool = False,
+    max_seq_len: int = 4096,
+    chars_per_token: float = 4.0,
+    prefix_budget_ratio: float = 0.45,
+) -> Dict[str, Any]:
+    exported = 0
+    source_episodes = 0
+    skipped = Counter()
+    max_estimated_units = 0
+
+    def rows():
+        nonlocal exported, source_episodes, max_estimated_units
+        for row, episode, error in iter_episodes(db_path, limit=limit):
+            if error:
+                skipped[error] += 1
+                continue
+            assert episode is not None
+            if episode["quality"]["skip"] and not include_skipped:
+                skipped[episode["quality"]["skip_reason"]] += 1
+                continue
+            windows, window_skipped = openai_windowed_from_episode(
+                episode,
+                max_seq_len=max_seq_len,
+                chars_per_token=chars_per_token,
+                prefix_budget_ratio=prefix_budget_ratio,
+                include_metadata=include_metadata,
+            )
+            skipped.update(window_skipped)
+            if not windows:
+                continue
+            source_episodes += 1
+            for window in windows:
+                exported += 1
+                max_estimated_units = max(
+                    max_estimated_units,
+                    estimate_openai_messages_units(window.get("messages") or [], chars_per_token),
+                )
+                yield window
+
+    written = dump_jsonl(out_path, rows())
+    return {
+        "db_path": db_path,
+        "out_path": out_path,
+        "format": "openai_windowed",
+        "include_metadata": include_metadata,
+        "max_seq_len": max_seq_len,
+        "token_budget_mode": "json_char_count_divisor",
+        "chars_per_token": chars_per_token,
+        "prefix_budget_ratio": prefix_budget_ratio,
+        "source_episodes": source_episodes,
+        "exported": exported,
+        "written": written,
+        "max_estimated_units": max_estimated_units,
+        "skipped": dict(skipped),
+    }
+
+
 def print_json(obj: Dict[str, Any]) -> None:
     print(json.dumps(obj, ensure_ascii=False, indent=2))
 
@@ -1009,10 +1311,13 @@ def main() -> None:
 
     export_p = sub.add_parser("export", help="Export dataset")
     export_p.add_argument("--out", required=True, help="Output JSONL path")
-    export_p.add_argument("--format", choices=["canonical", "sharegpt", "tool_sft", "openai"], default="canonical")
+    export_p.add_argument("--format", choices=["canonical", "sharegpt", "tool_sft", "openai", "openai_windowed"], default="canonical")
     export_p.add_argument("--include-skipped", action="store_true", help="Include low-quality/skipped episodes")
     export_p.add_argument("--include-metadata", action="store_true", help="Include metadata in supported outputs")
     export_p.add_argument("--no-tools", action="store_true", help="Do not inject tool definitions into ShareGPT system turns")
+    export_p.add_argument("--max-seq-len", type=int, default=4096, help="Estimated max sequence length for windowed exports")
+    export_p.add_argument("--chars-per-token", type=float, default=4.0, help="Heuristic character/token divisor for windowed exports")
+    export_p.add_argument("--prefix-budget-ratio", type=float, default=0.45, help="Maximum window budget fraction reserved for fixed prefix in windowed exports")
     export_p.add_argument("--limit", type=int, default=None, help="Limit number of calls read")
 
     args = parser.parse_args()
@@ -1045,6 +1350,17 @@ def main() -> None:
                 limit=args.limit,
                 include_skipped=args.include_skipped,
                 include_metadata=args.include_metadata,
+            )
+        elif args.format == "openai_windowed":
+            result = export_openai_windowed_dataset(
+                db_path,
+                args.out,
+                limit=args.limit,
+                include_skipped=args.include_skipped,
+                include_metadata=args.include_metadata,
+                max_seq_len=args.max_seq_len,
+                chars_per_token=args.chars_per_token,
+                prefix_budget_ratio=args.prefix_budget_ratio,
             )
         else:
             result = export_dataset(db_path, args.out, limit=args.limit, include_skipped=args.include_skipped)
