@@ -362,16 +362,20 @@ class TrayApp:
 
 def main() -> None:
     if "--settings-dialog-mac" in sys.argv:
-        _run_settings_dialog_macos(
+        result = _run_settings_dialog_macos(
             port_default=os.environ.get("LLM_TAP_DIALOG_PORT", str(DEFAULT_PORT)),
             data_dir_default=os.environ.get("LLM_TAP_DIALOG_DATA_DIR", DEFAULT_DATA_DIR),
         )
+        if result is not None:
+            sys.stdout.write(json.dumps(result, ensure_ascii=False))
         return
     if "--settings-dialog-tk" in sys.argv:
-        _run_settings_dialog_tk(
+        result = _run_settings_dialog_tk(
             port_default=os.environ.get("LLM_TAP_DIALOG_PORT", str(DEFAULT_PORT)),
             data_dir_default=os.environ.get("LLM_TAP_DIALOG_DATA_DIR", DEFAULT_DATA_DIR),
         )
+        if result is not None:
+            sys.stdout.write(json.dumps(result, ensure_ascii=False))
         return
     settings = _load_settings()
     port = int(os.environ.get("LLM_TAP_PORT") or settings.get("port") or DEFAULT_PORT)
