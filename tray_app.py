@@ -25,8 +25,8 @@ from raw_storage import register_call_saved_callback
 
 
 DEFAULT_PORT = 12345
-DATA_DIR = os.path.expanduser("~/.llm-tap")
-SETTINGS_FILE = os.path.join(DATA_DIR, "settings.json")
+DEFAULT_DATA_DIR = os.path.expanduser("~/.llm-tap")
+SETTINGS_FILE = os.path.join(DEFAULT_DATA_DIR, "settings.json")
 ACTIVE_DURATION = 2.0  # seconds the icon stays "active" after a captured call
 
 # LANCZOS moved between Pillow versions; resolve once at import time.
@@ -76,14 +76,15 @@ def _load_settings() -> dict:
 
 
 def _save_settings(settings: dict) -> None:
-    os.makedirs(DATA_DIR, exist_ok=True)
+    os.makedirs(DEFAULT_DATA_DIR, exist_ok=True)
     with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
         json.dump(settings, f, ensure_ascii=False, indent=2)
 
 
 class TrayApp:
-    def __init__(self, port: int = DEFAULT_PORT):
+    def __init__(self, port: int = DEFAULT_PORT, data_dir: str = DEFAULT_DATA_DIR):
         self.port = port
+        self.data_dir = os.path.abspath(os.path.expanduser(data_dir))
         self.lan_ip = _lan_ip()
         self.count = 0
         self.active_until = 0.0
@@ -97,6 +98,7 @@ class TrayApp:
                 pystray.MenuItem("llm-tap", None, enabled=False),
                 pystray.MenuItem(lambda _: f"Captured: {self.count}", None, enabled=False),
                 pystray.MenuItem(lambda _: f"Port: {self.port}", None, enabled=False),
+                pystray.MenuItem(lambda _: f"Data: {self.data_dir}", None, enabled=False),
                 pystray.MenuItem(lambda _: f"http://{self.lan_ip}:{self.port}/", None, enabled=False),
                 pystray.Menu.SEPARATOR,
                 pystray.MenuItem("Browse Data", self._open_web),
@@ -227,17 +229,19 @@ class TrayApp:
     # ---------- proxy lifecycle ----------
 
     def _start_proxy(self) -> None:
+        os.makedirs(self.data_dir, exist_ok=True)
+        os.chdir(self.data_dir)
         self.proxy_handle = proxy_oneapi.start_proxy_in_thread(
             port=self.port,
-            config=os.path.join(DATA_DIR, "config.json"),
+            config=os.path.join(self.data_dir, "config.json"),
             log_level="INFO",
         )
 
-    def _restart_proxy(self, new_port: int) -> None:
-        """Restart the proxy thread with a new port.
+    def _restart_proxy(self, new_port: int, new_data_dir=None) -> None:
+        """Restart the proxy thread with updated settings.
 
         Stops the old proxy's AppRunner so its listening socket is released,
-        then starts a fresh proxy bound to the new port.
+        then starts a fresh proxy bound to the new port and data directory.
         """
         if self.proxy_handle is not None:
             try:
@@ -246,6 +250,8 @@ class TrayApp:
                 print(f"[llm-tap] failed to stop old proxy: {e}")
             self.proxy_handle = None
         self.port = new_port
+        if new_data_dir is not None:
+            self.data_dir = os.path.abspath(os.path.expanduser(new_data_dir))
         self._start_proxy()
 
     # ---------- menu actions ----------
@@ -254,19 +260,13 @@ class TrayApp:
         webbrowser.open(f"http://127.0.0.1:{self.port}/")
 
     def _open_settings(self, icon, item) -> None:
-        """Open a settings dialog to configure the port.
-
-        macOS: pystray runs menu callbacks on a background thread, where tkinter
-        cannot create a Tk() instance. We use osascript (built-in AppleScript
-        dialog) instead, which works from any thread.
-        Windows: pystray runs callbacks on the main thread; tkinter works fine.
+        """Open a settings dialog to configure the port and data directory.
         """
-        if sys.platform == "darwin":
-            new_port = self._settings_dialog_mac()
-        else:
-            new_port = self._settings_dialog_tk()
-        if new_port is None:
+        values = self._settings_dialog()
+        if values is None:
             return
+        new_port = values.get("port")
+        new_data_dir = values.get("data_dir")
         try:
             p = int(str(new_port).strip())
             if not (1 <= p <= 65535):
@@ -274,63 +274,103 @@ class TrayApp:
         except ValueError:
             self._alert(f"Invalid port: {new_port!r}. Please enter a number between 1 and 65535.")
             return
-        if p != self.port:
-            self._restart_proxy(p)
-            _save_settings({"port": p})
-            self._alert(f"Port changed to {p}. Proxy restarted.")
-
-    def _settings_dialog_mac(self):
-        """Use osascript to show a native input dialog on macOS."""
-        import subprocess
-        script = (
-            f'set v to text returned of (display dialog "Listen Port:" '
-            f'default answer "{self.port}" buttons {{"Cancel", "OK"}} '
-            f'default button "OK" with title "llm-tap Settings")'
-        )
+        data_dir_text = str(new_data_dir or "").strip()
+        if not data_dir_text:
+            self._alert("Invalid data directory. Please enter a folder path.")
+            return
+        data_dir = os.path.abspath(os.path.expanduser(data_dir_text))
         try:
-            r = subprocess.run(
-                ["osascript", "-e", script],
-                capture_output=True, text=True, timeout=120,
-            )
+            os.makedirs(data_dir, exist_ok=True)
+        except OSError as e:
+            self._alert(f"Cannot use data directory: {e}")
+            return
+
+        port_changed = p != self.port
+        data_dir_changed = data_dir != self.data_dir
+        if port_changed or data_dir_changed:
+            self._restart_proxy(p, data_dir)
+            settings = _load_settings()
+            settings.update({"port": p, "data_dir": data_dir})
+            _save_settings(settings)
+            self._alert("Settings saved. Proxy restarted.")
+
+    def _settings_dialog(self):
+        """Show a single cross-platform settings window in a helper process."""
+        import subprocess
+        import textwrap
+
+        script = textwrap.dedent(
+            f"""
+            import json
+            import sys
+
+            try:
+                import tkinter as tk
+                from tkinter import ttk, filedialog
+            except Exception:
+                sys.exit(1)
+
+            root = tk.Tk()
+            root.title("llm-tap Settings")
+            root.geometry("560x210")
+            root.resizable(False, False)
+
+            body = ttk.Frame(root, padding=18)
+            body.pack(fill="both", expand=True)
+            body.columnconfigure(1, weight=1)
+
+            ttk.Label(body, text="Listen Port:").grid(row=0, column=0, sticky="w", pady=(0, 6))
+            port_var = tk.StringVar(value={json.dumps(str(self.port))})
+            port_entry = ttk.Entry(body, textvariable=port_var, width=12)
+            port_entry.grid(row=0, column=1, sticky="w", pady=(0, 6))
+            port_entry.focus_set()
+
+            ttk.Label(body, text="Data Directory:").grid(row=1, column=0, sticky="w", pady=(8, 6))
+            data_dir_var = tk.StringVar(value={json.dumps(self.data_dir)})
+            data_entry = ttk.Entry(body, textvariable=data_dir_var, width=46)
+            data_entry.grid(row=1, column=1, sticky="ew", pady=(8, 6))
+
+            def browse():
+                selected = filedialog.askdirectory(initialdir=data_dir_var.get() or {json.dumps(self.data_dir)})
+                if selected:
+                    data_dir_var.set(selected)
+
+            ttk.Button(body, text="Browse...", command=browse).grid(row=1, column=2, padx=(8, 0), pady=(8, 6))
+
+            result = {{"value": None}}
+
+            def ok():
+                result["value"] = {{"port": port_var.get(), "data_dir": data_dir_var.get()}}
+                root.destroy()
+
+            def cancel():
+                root.destroy()
+
+            btns = ttk.Frame(root)
+            btns.pack(pady=10)
+            ttk.Button(btns, text="OK", command=ok).pack(side="left", padx=8)
+            ttk.Button(btns, text="Cancel", command=cancel).pack(side="left", padx=8)
+            root.bind("<Return>", lambda _event: ok())
+            root.bind("<Escape>", lambda _event: cancel())
+            root.protocol("WM_DELETE_WINDOW", cancel)
+            root.mainloop()
+
+            if result["value"] is None:
+                sys.exit(2)
+            sys.stdout.write(json.dumps(result["value"], ensure_ascii=False))
+            """
+        )
+
+        try:
+            r = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=120)
         except Exception:
             return None
         if r.returncode != 0:
-            return None  # user cancelled
-        return r.stdout.strip()
-
-    def _settings_dialog_tk(self):
-        """Use tkinter on Windows/Linux (main thread). Returns None on cancel."""
-        try:
-            import tkinter as tk
-            from tkinter import ttk, messagebox
-        except ImportError:
             return None
-        win = tk.Tk()
-        win.title("llm-tap Settings")
-        win.geometry("320x160")
-        win.resizable(False, False)
-        ttk.Label(win, text="Listen Port:").pack(pady=(20, 5))
-        port_var = tk.StringVar(value=str(self.port))
-        entry = ttk.Entry(win, textvariable=port_var, width=12, justify="center")
-        entry.pack(pady=5)
-        entry.focus_set()
-        result = {"value": None}
-
-        def _ok():
-            result["value"] = port_var.get()
-            win.destroy()
-
-        def _cancel():
-            win.destroy()
-
-        btn_frame = ttk.Frame(win)
-        btn_frame.pack(pady=10)
-        ttk.Button(btn_frame, text="OK", command=_ok).pack(side="left", padx=8)
-        ttk.Button(btn_frame, text="Cancel", command=_cancel).pack(side="left", padx=8)
-        win.bind("<Return>", lambda _: _ok())
-        win.bind("<Escape>", lambda _: _cancel())
-        win.mainloop()
-        return result["value"]
+        try:
+            return json.loads(r.stdout.strip() or "{}")
+        except json.JSONDecodeError:
+            return None
 
     def _alert(self, msg: str) -> None:
         """Show an info alert (mac: osascript, others: tkinter)."""
@@ -353,9 +393,6 @@ class TrayApp:
     # ---------- main loop ----------
 
     def run(self) -> None:
-        os.makedirs(DATA_DIR, exist_ok=True)
-        os.chdir(DATA_DIR)
-
         # start the proxy in a background daemon thread
         self._start_proxy()
         # subscribe to captured-call events
@@ -368,7 +405,8 @@ class TrayApp:
 def main() -> None:
     settings = _load_settings()
     port = int(os.environ.get("LLM_TAP_PORT") or settings.get("port") or DEFAULT_PORT)
-    TrayApp(port=port).run()
+    data_dir = os.environ.get("LLM_TAP_DATA_DIR") or settings.get("data_dir") or DEFAULT_DATA_DIR
+    TrayApp(port=port, data_dir=data_dir).run()
 
 
 if __name__ == "__main__":

@@ -55,7 +55,7 @@ Download the latest release for your platform from the [Releases page](https://g
 
 Unzip and launch. macOS: the `.app` is unsigned, so unblock it once with `xattr -cr /path/to/llm-tap.app`. Windows: if SmartScreen warns, choose "More info → Run anyway".
 
-The tray app starts the proxy on port `12345` by default. Open the Web UI from the tray menu, or change the port via **Settings...**.
+The tray app starts the proxy on port `12345` by default. Open the Web UI from the tray menu, or change the port and data directory via **Settings...**.
 
 **Option B — Run from source**
 
@@ -246,7 +246,7 @@ python3 proxy_oneapi.py -p 12345 --log-level INFO
 
 ## Desktop App (Menu Bar / System Tray)
 
-`tray_app.py` wraps the proxy in a menu-bar (macOS) / system-tray (Windows) app. It shows a teardrop icon — blue-teal when idle, **green with a soft glow and a red count badge** for ~2s whenever a call is captured. The tray menu lets you open the Web UI, change the listen port (persisted to `~/.llm-tap/settings.json`), and quit.
+`tray_app.py` wraps the proxy in a menu-bar (macOS) / system-tray (Windows) app. It shows a teardrop icon — blue-teal when idle, **green with a soft glow and a red count badge** for ~2s whenever a call is captured. The tray menu lets you open the Web UI, change the listen port and data directory (persisted to `~/.llm-tap/settings.json`), and quit.
 
 Run from source:
 
@@ -259,9 +259,10 @@ pip install pywin32
 
 python3 tray_app.py                 # default port 12345
 LLM_TAP_PORT=9000 python3 tray_app.py
+LLM_TAP_DATA_DIR=/path/to/llm-tap-data python3 tray_app.py
 ```
 
-Prebuilt binaries are published via GitHub Actions on every `v*` tag — see **Quick Start** above for download links and launch notes. Data is stored under `~/.llm-tap/` when running as a desktop app.
+Prebuilt binaries are published via GitHub Actions on every `v*` tag — see **Quick Start** above for download links and launch notes. Data is stored under `~/.llm-tap/` by default when running as a desktop app, and can be changed from **Settings...**.
 
 ## Design Principles
 

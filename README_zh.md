@@ -55,7 +55,7 @@ LLM 透明代理 + 数据采集系统。
 
 解压后启动即可。macOS：`.app` 未签名，首次打开需执行一次 `xattr -cr /path/to/llm-tap.app` 解除隔离。Windows：若 SmartScreen 拦截，选择"更多信息 → 仍要运行"。
 
-托盘应用默认在 `12345` 端口启动代理，可从托盘菜单打开 Web 界面，或通过 **Settings...** 修改端口。
+托盘应用默认在 `12345` 端口启动代理，可从托盘菜单打开 Web 界面，或通过 **Settings...** 修改端口和数据目录。
 
 **方式 B — 从源码运行**
 
@@ -246,7 +246,7 @@ python3 proxy_oneapi.py -p 12345 --log-level INFO
 
 ## 桌面应用（菜单栏 / 系统托盘）
 
-`tray_app.py` 把代理包装成 macOS 菜单栏 / Windows 系统托盘应用。显示水滴图标——空闲时为蓝青色，**每采集到一次调用就变绿并泛起柔光、右上角显示红色计数徽标约 2 秒**。托盘菜单可打开 Web 界面、修改监听端口（持久化到 `~/.llm-tap/settings.json`）、退出。
+`tray_app.py` 把代理包装成 macOS 菜单栏 / Windows 系统托盘应用。显示水滴图标——空闲时为蓝青色，**每采集到一次调用就变绿并泛起柔光、右上角显示红色计数徽标约 2 秒**。托盘菜单可打开 Web 界面、修改监听端口和数据目录（持久化到 `~/.llm-tap/settings.json`）、退出。
 
 从源码运行：
 
@@ -259,9 +259,10 @@ pip install pywin32
 
 python3 tray_app.py                 # 默认端口 12345
 LLM_TAP_PORT=9000 python3 tray_app.py
+LLM_TAP_DATA_DIR=/path/to/llm-tap-data python3 tray_app.py
 ```
 
-预构建发布版由 GitHub Actions 在每次打 `v*` 标签时自动发布，下载链接和启动说明见上方**快速开始**。作为桌面应用运行时，数据存放在 `~/.llm-tap/`。
+预构建发布版由 GitHub Actions 在每次打 `v*` 标签时自动发布，下载链接和启动说明见上方**快速开始**。作为桌面应用运行时，数据默认存放在 `~/.llm-tap/`，也可在 **Settings...** 中修改。
 
 ## 设计原则
 
