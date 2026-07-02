@@ -295,16 +295,24 @@ class TrayApp:
             self._alert("Settings saved. Proxy restarted.")
 
     def _settings_dialog(self):
-        """Show a single cross-platform settings window in a helper process."""
+        """Show the settings window.
+
+        macOS runs the tray callback off the main thread, so use the dedicated
+        helper-process dialog there. Windows/Linux can show Tk directly in the
+        current process.
+        """
+        if sys.platform == "darwin":
+            return self._settings_dialog_mac()
+        return _run_settings_dialog(port_default=str(self.port), data_dir_default=self.data_dir)
+
+    def _settings_dialog_mac(self):
+        """Show the settings window from a helper process on macOS."""
         import subprocess
 
         env = os.environ.copy()
         env["LLM_TAP_DIALOG_PORT"] = str(self.port)
         env["LLM_TAP_DIALOG_DATA_DIR"] = self.data_dir
-        if getattr(sys, "frozen", False):
-            cmd = [sys.executable, "--settings-dialog"]
-        else:
-            cmd = [sys.executable, os.path.abspath(__file__), "--settings-dialog"]
+        cmd = [sys.executable, "--settings-dialog"] if getattr(sys, "frozen", False) else [sys.executable, os.path.abspath(__file__), "--settings-dialog"]
         try:
             r = subprocess.run(
                 cmd,
@@ -354,7 +362,10 @@ class TrayApp:
 
 def main() -> None:
     if "--settings-dialog" in sys.argv:
-        _run_settings_dialog()
+        _run_settings_dialog(
+            port_default=os.environ.get("LLM_TAP_DIALOG_PORT", str(DEFAULT_PORT)),
+            data_dir_default=os.environ.get("LLM_TAP_DIALOG_DATA_DIR", DEFAULT_DATA_DIR),
+        )
         return
     settings = _load_settings()
     port = int(os.environ.get("LLM_TAP_PORT") or settings.get("port") or DEFAULT_PORT)
@@ -362,15 +373,12 @@ def main() -> None:
     TrayApp(port=port, data_dir=data_dir).run()
 
 
-def _run_settings_dialog() -> None:
+def _run_settings_dialog(*, port_default: str, data_dir_default: str) -> dict | None:
     try:
         import tkinter as tk
         from tkinter import ttk, filedialog
     except Exception:
-        sys.exit(1)
-
-    port_default = os.environ.get("LLM_TAP_DIALOG_PORT", str(DEFAULT_PORT))
-    data_dir_default = os.environ.get("LLM_TAP_DIALOG_DATA_DIR", DEFAULT_DATA_DIR)
+        return None
 
     root = tk.Tk()
     root.title("llm-tap Settings")
@@ -418,8 +426,11 @@ def _run_settings_dialog() -> None:
     root.mainloop()
 
     if result["value"] is None:
-        sys.exit(2)
-    sys.stdout.write(json.dumps(result["value"], ensure_ascii=False))
+        return None
+    if "--settings-dialog" in sys.argv:
+        sys.stdout.write(json.dumps(result["value"], ensure_ascii=False))
+        return result["value"]
+    return result["value"]
 
 
 if __name__ == "__main__":
