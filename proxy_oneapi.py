@@ -81,6 +81,36 @@ def detect_protocol_from_path(path: str) -> str:
     return "unknown"
 
 
+def is_error_response_body(body: Any) -> bool:
+    """Return True for HTTP-200 bodies that are provider-level failures.
+
+    Some OpenAI-compatible gateways return transport status 200 with a JSON
+    body like {"code": 500, "msg": "404 NOT_FOUND", "success": false}.
+    Those are useful to relay to the client but should not become training data.
+    """
+    if not isinstance(body, dict):
+        return False
+
+    if body.get("success") is False:
+        return True
+
+    error = body.get("error")
+    if error:
+        return True
+
+    status = body.get("status")
+    if status in {"failed", "incomplete", "cancelled", "canceled", "error"}:
+        return True
+
+    code = body.get("code")
+    if isinstance(code, int) and code >= 400:
+        return True
+    if isinstance(code, str) and code.isdigit() and int(code) >= 400:
+        return True
+
+    return False
+
+
 # ========== 认证校验 ==========
 
 def verify_auth(request: web.Request, config: dict) -> bool:
@@ -506,6 +536,14 @@ class ProxyServer:
                 merged["_captured_bytes"] = captured_stream_bytes
                 merged["_capture_max_bytes"] = self.stream_capture_max_bytes
 
+            if is_error_response_body(merged):
+                await self.async_logger.warning(
+                    f"Skip saving stream error response: {call_id}, "
+                    f"status={merged.get('status')!r}, code={merged.get('code')!r}, "
+                    f"error={bool(merged.get('error'))}, success={merged.get('success')!r}"
+                )
+                return response
+
             # 保存 raw
             try:
                 await self._queue_raw_save(
@@ -596,7 +634,15 @@ class ProxyServer:
         else:
             stop_reason = None
 
-        # 只要上游 200 就保存（非 JSON 时 response_body 用原始文本）
+        if is_error_response_body(response_json):
+            await self.async_logger.warning(
+                f"Skip saving non-stream error response: {call_id}, "
+                f"status={response_json.get('status')!r}, code={response_json.get('code')!r}, "
+                f"error={bool(response_json.get('error'))}, success={response_json.get('success')!r}"
+            )
+            return response
+
+        # 只保存上游 HTTP 200 且响应体不是业务错误的调用（非 JSON 时 response_body 用原始文本）
         try:
             raw_response = raw_bytes.decode("utf-8", errors="replace")
             raw_body = {"_raw": raw_response}

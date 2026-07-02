@@ -171,6 +171,8 @@ Organized by host + date. Each file is one complete call.
 
 **Request and response are in the same file.** No protocol conversion — each protocol's native structure is preserved.
 
+If the upstream returns HTTP 200 but the JSON body itself is a provider-level error, such as `{"code":500,"msg":"404 NOT_FOUND","success":false}`, a top-level `error`, an Anthropic streaming `type=error` event, or Responses `status=failed/incomplete`, the proxy still relays it to the client but does not save it as training data.
+
 ### Protocol Fidelity
 
 | Protocol | Path Suffix | Response Structure |

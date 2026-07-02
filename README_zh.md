@@ -171,6 +171,8 @@ data/calls/
 
 **问和答在同一个文件里**，不做任何协议转换，保留各协议的原生结构。
 
+如果上游返回 HTTP 200，但 JSON 响应体本身表示业务错误（例如 `{"code":500,"msg":"404 NOT_FOUND","success":false}`、顶层 `error`、Anthropic 流式 `type=error` 事件，或 Responses `status=failed/incomplete`），代理仍会把响应原样返回给客户端，但不会保存为训练数据。
+
 ### 协议保真
 
 | 协议 | 路径后缀 | 响应结构 |

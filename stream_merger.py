@@ -246,13 +246,17 @@ class AnthropicMessagesMerger:
         self.stop_reason: Optional[str] = None
         self.stop_sequence: Optional[str] = None
         self.usage: Dict[str, Any] = {}
+        self.error: Optional[Dict[str, Any]] = None
 
     def feed(self, event: dict) -> None:
         if not isinstance(event, dict):
             return
         etype = event.get("type")
 
-        if etype == "message_start":
+        if etype == "error":
+            self.error = json.loads(json.dumps(event.get("error", event)))
+
+        elif etype == "message_start":
             self.message = json.loads(json.dumps(event.get("message", {})))
             msg_usage = self.message.get("usage", {}) or {}
             self.usage = dict(msg_usage)
@@ -327,6 +331,12 @@ class AnthropicMessagesMerger:
         return evt
 
     def result(self) -> dict:
+        if self.error is not None:
+            return {
+                "type": "error",
+                "error": self.error,
+            }
+
         blocks = [self.content_blocks[i] for i in sorted(self.content_blocks.keys())]
         if self.message is None:
             # 没收到 message_start（异常情况）
