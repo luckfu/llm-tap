@@ -303,7 +303,7 @@ class TrayApp:
         """
         if sys.platform == "darwin":
             return self._settings_dialog_mac()
-        return _run_settings_dialog(port_default=str(self.port), data_dir_default=self.data_dir)
+        return _run_settings_dialog_tk(port_default=str(self.port), data_dir_default=self.data_dir)
 
     def _settings_dialog_mac(self):
         """Show the settings window from a helper process on macOS."""
@@ -312,7 +312,7 @@ class TrayApp:
         env = os.environ.copy()
         env["LLM_TAP_DIALOG_PORT"] = str(self.port)
         env["LLM_TAP_DIALOG_DATA_DIR"] = self.data_dir
-        cmd = [sys.executable, "--settings-dialog"] if getattr(sys, "frozen", False) else [sys.executable, os.path.abspath(__file__), "--settings-dialog"]
+        cmd = [sys.executable, "--settings-dialog-mac"] if getattr(sys, "frozen", False) else [sys.executable, os.path.abspath(__file__), "--settings-dialog-mac"]
         try:
             r = subprocess.run(
                 cmd,
@@ -361,8 +361,14 @@ class TrayApp:
 
 
 def main() -> None:
-    if "--settings-dialog" in sys.argv:
-        _run_settings_dialog(
+    if "--settings-dialog-mac" in sys.argv:
+        _run_settings_dialog_macos(
+            port_default=os.environ.get("LLM_TAP_DIALOG_PORT", str(DEFAULT_PORT)),
+            data_dir_default=os.environ.get("LLM_TAP_DIALOG_DATA_DIR", DEFAULT_DATA_DIR),
+        )
+        return
+    if "--settings-dialog-tk" in sys.argv:
+        _run_settings_dialog_tk(
             port_default=os.environ.get("LLM_TAP_DIALOG_PORT", str(DEFAULT_PORT)),
             data_dir_default=os.environ.get("LLM_TAP_DIALOG_DATA_DIR", DEFAULT_DATA_DIR),
         )
@@ -373,7 +379,7 @@ def main() -> None:
     TrayApp(port=port, data_dir=data_dir).run()
 
 
-def _run_settings_dialog(*, port_default: str, data_dir_default: str) -> dict | None:
+def _run_settings_dialog_tk(*, port_default: str, data_dir_default: str) -> dict | None:
     try:
         import tkinter as tk
         from tkinter import ttk, filedialog
@@ -427,10 +433,71 @@ def _run_settings_dialog(*, port_default: str, data_dir_default: str) -> dict | 
 
     if result["value"] is None:
         return None
-    if "--settings-dialog" in sys.argv:
-        sys.stdout.write(json.dumps(result["value"], ensure_ascii=False))
-        return result["value"]
     return result["value"]
+
+
+def _run_settings_dialog_macos(*, port_default: str, data_dir_default: str) -> dict | None:
+    try:
+        from AppKit import (
+            NSAlert,
+            NSApp,
+            NSApplication,
+            NSApplicationActivationPolicyAccessory,
+            NSBezelStyleRounded,
+            NSButton,
+            NSFont,
+            NSMakeRect,
+            NSTextField,
+            NSView,
+        )
+    except Exception:
+        return None
+
+    app = NSApplication.sharedApplication()
+    app.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
+    app.activateIgnoringOtherApps_(True)
+
+    alert = NSAlert.alloc().init()
+    alert.setMessageText_("llm-tap Settings")
+    alert.setInformativeText_("Edit the listen port and data directory, then click OK.")
+    alert.addButtonWithTitle_("OK")
+    alert.addButtonWithTitle_("Cancel")
+
+    accessory = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 480, 120))
+    label_font = NSFont.systemFontOfSize_(12)
+
+    def make_label(text, x, y):
+        label = NSTextField.alloc().initWithFrame_(NSMakeRect(x, y, 120, 20))
+        label.setStringValue_(text)
+        label.setBezeled_(False)
+        label.setDrawsBackground_(False)
+        label.setEditable_(False)
+        label.setSelectable_(False)
+        label.setFont_(label_font)
+        return label
+
+    port_label = make_label("Listen Port:", 0, 78)
+    port_field = NSTextField.alloc().initWithFrame_(NSMakeRect(120, 74, 120, 24))
+    port_field.setStringValue_(port_default)
+
+    dir_label = make_label("Data Directory:", 0, 34)
+    dir_field = NSTextField.alloc().initWithFrame_(NSMakeRect(120, 30, 340, 24))
+    dir_field.setStringValue_(data_dir_default)
+
+    accessory.addSubview_(port_label)
+    accessory.addSubview_(port_field)
+    accessory.addSubview_(dir_label)
+    accessory.addSubview_(dir_field)
+    alert.setAccessoryView_(accessory)
+
+    response = alert.runModal()
+    if response != 1000:
+        return None
+
+    return {
+        "port": port_field.stringValue(),
+        "data_dir": dir_field.stringValue(),
+    }
 
 
 if __name__ == "__main__":
