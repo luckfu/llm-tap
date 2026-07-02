@@ -800,6 +800,200 @@ def export_tool_sft_dataset(
     }
 
 
+def reasoning_text(value: Any) -> str:
+    if not value:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        texts: List[str] = []
+        for item in value:
+            if isinstance(item, str):
+                texts.append(item)
+            elif isinstance(item, dict):
+                text = item.get("text") or item.get("summary_text") or item.get("content")
+                if text:
+                    texts.append(str(text))
+        return "\n".join(texts)
+    return as_text(value)
+
+
+def with_think_block(content: str, thoughts: List[str]) -> str:
+    cleaned = [text.strip() for text in thoughts if text and text.strip()]
+    if not cleaned:
+        return content
+    think = "<think>\n" + "\n\n".join(cleaned) + "\n</think>"
+    return "\n".join(part for part in (think, content) if part)
+
+
+def tool_arguments_string(arguments: Any) -> str:
+    if arguments is None:
+        return "{}"
+    if isinstance(arguments, str):
+        return arguments
+    return json.dumps(arguments, ensure_ascii=False, separators=(",", ":"))
+
+
+def openai_tool_call(tool_call: Dict[str, Any], fallback_id: str) -> Dict[str, Any]:
+    fn = tool_call.get("function") or {}
+    return {
+        "id": tool_call.get("id") or fallback_id,
+        "type": "function",
+        "function": {
+            "name": fn.get("name") or tool_call.get("name") or tool_call.get("type") or "tool",
+            "arguments": tool_arguments_string(fn.get("arguments")),
+        },
+    }
+
+
+def openai_from_episode(
+    episode: Dict[str, Any],
+    include_metadata: bool = False,
+) -> Optional[Dict[str, Any]]:
+    messages: List[Dict[str, Any]] = []
+    pending_assistant: Optional[Dict[str, Any]] = None
+    pending_reasoning: List[str] = []
+    tool_names_by_id: Dict[str, str] = {}
+    tool_call_seq = 0
+
+    def flush_assistant() -> None:
+        nonlocal pending_assistant, pending_reasoning
+        if not pending_assistant:
+            return
+        content = as_text(pending_assistant.get("content"))
+        content = with_think_block(content, pending_reasoning)
+        pending_reasoning = []
+
+        out: Dict[str, Any] = {"role": "assistant", "content": content}
+        tool_calls = pending_assistant.get("tool_calls") or []
+        if tool_calls:
+            out["tool_calls"] = tool_calls
+        if out["content"] or out.get("tool_calls"):
+            messages.append(out)
+        pending_assistant = None
+
+    for message in episode.get("messages") or []:
+        message_type = message.get("type")
+        role = message.get("role")
+
+        if message_type == "reasoning":
+            text = reasoning_text(message.get("summary"))
+            if text:
+                pending_reasoning.append(text)
+            continue
+
+        if message_type == "tool_call":
+            if pending_assistant is None:
+                pending_assistant = {"role": "assistant", "content": "", "tool_calls": []}
+            for tool_call in message.get("tool_calls") or []:
+                tool_call_seq += 1
+                fallback_id = f"call_{episode.get('id', 'episode').replace('-', '_')}_{tool_call_seq}"
+                converted = openai_tool_call(tool_call, fallback_id)
+                pending_assistant.setdefault("tool_calls", []).append(converted)
+                tool_names_by_id[converted["id"]] = converted["function"]["name"]
+            continue
+
+        if message_type == "tool_result" or role == "tool":
+            flush_assistant()
+            tool_call_id = message.get("tool_call_id")
+            if not tool_call_id:
+                continue
+            out = {
+                "role": "tool",
+                "tool_call_id": tool_call_id,
+                "content": as_text(message.get("content")),
+            }
+            name = message.get("name") or tool_names_by_id.get(tool_call_id)
+            if name:
+                out["name"] = name
+            messages.append(out)
+            continue
+
+        if role == "assistant":
+            if pending_assistant is None:
+                pending_assistant = {"role": "assistant", "content": "", "tool_calls": []}
+            content = as_text(message.get("content"))
+            reasoning = reasoning_text(message.get("reasoning"))
+            if reasoning:
+                pending_reasoning.append(reasoning)
+            if content:
+                existing = as_text(pending_assistant.get("content"))
+                pending_assistant["content"] = "\n\n".join(part for part in (existing, content) if part)
+            for tool_call in message.get("tool_calls") or []:
+                tool_call_seq += 1
+                fallback_id = f"call_{episode.get('id', 'episode').replace('-', '_')}_{tool_call_seq}"
+                converted = openai_tool_call(tool_call, fallback_id)
+                pending_assistant.setdefault("tool_calls", []).append(converted)
+                tool_names_by_id[converted["id"]] = converted["function"]["name"]
+            continue
+
+        if role in {"system", "developer", "user"}:
+            flush_assistant()
+            content = as_text(message.get("content"))
+            if not content:
+                continue
+            messages.append({
+                "role": "system" if role == "developer" else role,
+                "content": content,
+            })
+
+    flush_assistant()
+
+    if not messages:
+        return None
+
+    item: Dict[str, Any] = {"messages": messages}
+    if include_metadata:
+        item["metadata"] = {
+            "id": episode.get("id"),
+            "schema": "llm-tap.openai_chat_finetune.v1",
+            "source": episode.get("source"),
+            "harness": episode.get("harness"),
+            "labels": episode.get("labels"),
+            "stats": episode.get("stats"),
+        }
+    return item
+
+
+def export_openai_dataset(
+    db_path: str,
+    out_path: str,
+    limit: Optional[int] = None,
+    include_skipped: bool = False,
+    include_metadata: bool = False,
+) -> Dict[str, Any]:
+    exported = 0
+    skipped = Counter()
+
+    def rows():
+        nonlocal exported
+        for row, episode, error in iter_episodes(db_path, limit=limit):
+            if error:
+                skipped[error] += 1
+                continue
+            assert episode is not None
+            if episode["quality"]["skip"] and not include_skipped:
+                skipped[episode["quality"]["skip_reason"]] += 1
+                continue
+            item = openai_from_episode(episode, include_metadata=include_metadata)
+            if item is None:
+                skipped["empty_openai_messages"] += 1
+                continue
+            exported += 1
+            yield item
+
+    written = dump_jsonl(out_path, rows())
+    return {
+        "db_path": db_path,
+        "out_path": out_path,
+        "format": "openai",
+        "include_metadata": include_metadata,
+        "exported": exported,
+        "written": written,
+        "skipped": dict(skipped),
+    }
+
+
 def print_json(obj: Dict[str, Any]) -> None:
     print(json.dumps(obj, ensure_ascii=False, indent=2))
 
@@ -807,7 +1001,6 @@ def print_json(obj: Dict[str, Any]) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Export llm-tap calls as canonical harness trajectories.")
     parser.add_argument("--db", default=DEFAULT_DB_PATH, help="Path to calls.db")
-    parser.add_argument("--limit", type=int, default=None, help="Limit number of calls read")
     sub = parser.add_subparsers(dest="command", required=True)
 
     inspect_p = sub.add_parser("inspect", help="Inspect exportability and print a JSON report")
@@ -816,9 +1009,9 @@ def main() -> None:
 
     export_p = sub.add_parser("export", help="Export dataset")
     export_p.add_argument("--out", required=True, help="Output JSONL path")
-    export_p.add_argument("--format", choices=["canonical", "sharegpt", "tool_sft"], default="canonical")
+    export_p.add_argument("--format", choices=["canonical", "sharegpt", "tool_sft", "openai"], default="canonical")
     export_p.add_argument("--include-skipped", action="store_true", help="Include low-quality/skipped episodes")
-    export_p.add_argument("--include-metadata", action="store_true", help="Include metadata in ShareGPT output")
+    export_p.add_argument("--include-metadata", action="store_true", help="Include metadata in supported outputs")
     export_p.add_argument("--no-tools", action="store_true", help="Do not inject tool definitions into ShareGPT system turns")
     export_p.add_argument("--limit", type=int, default=None, help="Limit number of calls read")
 
@@ -839,6 +1032,14 @@ def main() -> None:
             )
         elif args.format == "tool_sft":
             result = export_tool_sft_dataset(
+                db_path,
+                args.out,
+                limit=args.limit,
+                include_skipped=args.include_skipped,
+                include_metadata=args.include_metadata,
+            )
+        elif args.format == "openai":
+            result = export_openai_dataset(
                 db_path,
                 args.out,
                 limit=args.limit,

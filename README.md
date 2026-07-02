@@ -194,7 +194,7 @@ python export_harness_dataset.py inspect --preview 3
 Export canonical JSONL:
 
 ```bash
-python export_harness_dataset.py export --out exports/harness.jsonl
+python export_harness_dataset.py export --out data/harness.jsonl
 ```
 
 Export ShareGPT JSON:
@@ -213,11 +213,54 @@ python export_harness_dataset.py export --format tool_sft --out data/tool_sft.js
 
 Each `tool_sft` line has top-level `tools` and `messages`; `messages` preserves `assistant.tool_calls`, `role=tool`, `tool_call_id`, and `assistant.reasoning_content` when available.
 
+Export OpenAI Chat Completions fine-tuning JSONL:
+
+```bash
+python export_harness_dataset.py export --format openai --out data/openai_finetune.jsonl
+```
+
+Each `openai` line is a `{"messages":[...]}` object. The exporter maps `developer` to `system`, merges standalone Responses `reasoning` into the next `assistant.content` as `<think>...</think>`, combines adjacent tool calls into one `assistant.tool_calls` array, and always serializes `function.arguments` as a JSON string.
+
 By default, the exporter reads the desktop app database at `~/.llm-tap/calls.db`. To inspect the development database in the current directory:
 
 ```bash
 python export_harness_dataset.py --db calls.db inspect
 ```
+
+### Export Options
+
+Global options:
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--db PATH` | `~/.llm-tap/calls.db` | Database to read calls from. The desktop app writes to `~/.llm-tap/calls.db` by default; use `--db calls.db` for a local development database. |
+
+`inspect` options:
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--preview N` | `3` | Print N episode previews for a quick check of messages, tools, and model distribution. |
+| `--limit N` | unlimited | Read only the first N calls. Put it after `inspect`, for example `inspect --limit 100`. |
+
+`export` options:
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--out PATH` | required | Output file path. Prefer writing under `data/`, for example `data/openai_finetune.jsonl`. |
+| `--format FORMAT` | `canonical` | Export format. Choices: `canonical`, `sharegpt`, `tool_sft`, `openai`. |
+| `--limit N` | unlimited | Export only the first N calls. Put it after `export`, for example `export --limit 100`. |
+| `--include-skipped` | off | By default, low-quality examples such as calls without assistant output are skipped; enable this to write them anyway. |
+| `--include-metadata` | off | Adds source, model, harness, labels, and stats in supported formats. Useful for debugging and traceability; usually unnecessary for training. |
+| `--no-tools` | off | Applies only to `sharegpt`. Disables `<tools>...</tools>` tool definition injection while preserving tool call/result text trajectories. |
+
+Format summary:
+
+| Format | Output type | Use case |
+|--------|-------------|----------|
+| `canonical` | JSONL | llm-tap's provider-neutral intermediate format with the most raw information preserved. |
+| `sharegpt` | JSON array | ShareGPT-style conversation format; tool trajectories are serialized into XML-like text tags. |
+| `tool_sft` | JSONL | For training frameworks that support structured tool calling; preserves top-level `tools` and message-level `tool_calls`. |
+| `openai` | JSONL | OpenAI Chat Completions fine-tuning format. Each line is `{"messages":[...]}` for OpenAI-format-compatible data loaders. |
 
 ## Project Structure
 

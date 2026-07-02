@@ -194,7 +194,7 @@ python export_harness_dataset.py inspect --preview 3
 导出 canonical JSONL：
 
 ```bash
-python export_harness_dataset.py export --out exports/harness.jsonl
+python export_harness_dataset.py export --out data/harness.jsonl
 ```
 
 导出 ShareGPT JSON：
@@ -213,11 +213,54 @@ python export_harness_dataset.py export --format tool_sft --out data/tool_sft.js
 
 `tool_sft` 每行包含顶层 `tools` 和 `messages`，其中 `messages` 保留 `assistant.tool_calls`、`role=tool`、`tool_call_id`，以及可用时的 `assistant.reasoning_content`。
 
+导出 OpenAI Chat Completions 微调 JSONL：
+
+```bash
+python export_harness_dataset.py export --format openai --out data/openai_finetune.jsonl
+```
+
+`openai` 每行是一个 `{"messages":[...]}` 对象。导出器会把 `developer` 映射为 `system`，把 Responses 里的独立 `reasoning` 合并进下一条 `assistant.content` 的 `<think>...</think>`，把连续工具调用合并为同一个 `assistant.tool_calls` 数组，并确保 `function.arguments` 始终是 JSON 字符串。
+
 默认读取桌面应用数据目录 `~/.llm-tap/calls.db`。如果要读取当前目录的开发数据库：
 
 ```bash
 python export_harness_dataset.py --db calls.db inspect
 ```
+
+### 导出参数
+
+全局参数：
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--db PATH` | `~/.llm-tap/calls.db` | 指定要读取的调用数据库。桌面应用默认写入 `~/.llm-tap/calls.db`；源码开发时可用 `--db calls.db`。 |
+
+`inspect` 参数：
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--preview N` | `3` | 输出前 N 条 episode 预览，用于快速检查消息、工具和模型分布。 |
+| `--limit N` | 不限制 | 只读取前 N 条调用；参数写在 `inspect` 后面，例如 `inspect --limit 100`。 |
+
+`export` 参数：
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--out PATH` | 必填 | 输出文件路径。建议写到 `data/` 下，例如 `data/openai_finetune.jsonl`。 |
+| `--format FORMAT` | `canonical` | 导出格式。可选：`canonical`、`sharegpt`、`tool_sft`、`openai`。 |
+| `--limit N` | 不限制 | 只导出前 N 条调用；参数写在 `export` 后面，例如 `export --limit 100`。 |
+| `--include-skipped` | 关闭 | 默认跳过没有 assistant 输出等低质量样本；打开后会把这些样本也写出。 |
+| `--include-metadata` | 关闭 | 在支持的格式中额外写入源文件、模型、harness、标签和统计信息，主要用于调试溯源；正式训练通常不需要。 |
+| `--no-tools` | 关闭 | 仅对 `sharegpt` 生效。关闭 `<tools>...</tools>` 工具定义注入，但仍会保留工具调用/工具结果文本轨迹。 |
+
+格式说明：
+
+| 格式 | 输出类型 | 用途 |
+|------|----------|------|
+| `canonical` | JSONL | llm-tap 的通用中间格式，保留最多原始信息，适合二次转换。 |
+| `sharegpt` | JSON 数组 | ShareGPT/对话微调格式，工具轨迹会以 XML 风格标签写入文本。 |
+| `tool_sft` | JSONL | 面向支持结构化工具调用的训练框架，保留顶层 `tools` 和消息内 `tool_calls`。 |
+| `openai` | JSONL | OpenAI Chat Completions 微调格式，每行是 `{"messages":[...]}`，适合直接给 OpenAI 格式兼容的数据加载器。 |
 
 ## 项目结构
 
