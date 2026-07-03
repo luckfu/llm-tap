@@ -440,7 +440,131 @@ def iter_episodes(db_path: str, limit: Optional[int] = None):
         yield row, episode, error
 
 
-def inspect_dataset(db_path: str, limit: Optional[int] = None, preview: int = 3) -> Dict[str, Any]:
+def percentile(values: List[int], pct: float) -> Optional[int]:
+    if not values:
+        return None
+    ordered = sorted(values)
+    idx = int(math.ceil((pct / 100.0) * len(ordered))) - 1
+    idx = min(max(idx, 0), len(ordered) - 1)
+    return ordered[idx]
+
+
+def next_tool_results_for_target(messages: List[Dict[str, Any]], target_idx: int) -> List[Dict[str, Any]]:
+    target = messages[target_idx]
+    tool_calls = target.get("tool_calls") or []
+    tool_call_ids = {tool_call.get("id") for tool_call in tool_calls if tool_call.get("id")}
+    if not tool_call_ids:
+        return []
+
+    results: List[Dict[str, Any]] = []
+    idx = target_idx + 1
+    while idx < len(messages) and messages[idx].get("role") == "tool":
+        tool_call_id = messages[idx].get("tool_call_id")
+        if tool_call_id in tool_call_ids:
+            results.append(messages[idx])
+        idx += 1
+    return results
+
+
+def minimal_window_units_for_episode(
+    episode: Dict[str, Any],
+    *,
+    chars_per_token: float = 4.0,
+) -> Tuple[List[Dict[str, Any]], Counter]:
+    skipped = Counter()
+    item = openai_from_episode(episode, include_metadata=False)
+    if item is None:
+        skipped["empty_openai_messages"] += 1
+        return [], skipped
+
+    messages = item.get("messages") or []
+    first_assistant_idx = next(
+        (idx for idx, message in enumerate(messages) if message.get("role") == "assistant"),
+        None,
+    )
+    if first_assistant_idx is None:
+        skipped["no_assistant_target"] += 1
+        return [], skipped
+
+    prefix = messages[:first_assistant_idx]
+    rows: List[Dict[str, Any]] = []
+    for target_idx, target in enumerate(messages):
+        if target.get("role") != "assistant":
+            continue
+        if not target.get("content") and not target.get("tool_calls"):
+            skipped["empty_assistant_target"] += 1
+            continue
+
+        target_turn = [target] + next_tool_results_for_target(messages, target_idx)
+        units = estimate_openai_messages_units(prefix + target_turn, chars_per_token)
+        rows.append({
+            "episode_id": episode.get("id"),
+            "target_message_index": target_idx,
+            "estimated_min_units": units,
+            "prefix_units": estimate_openai_messages_units(prefix, chars_per_token),
+            "target_turn_units": estimate_openai_messages_units(target_turn, chars_per_token),
+            "target_has_tool_calls": bool(target.get("tool_calls")),
+            "target_tool_result_count": max(0, len(target_turn) - 1),
+        })
+    if not rows:
+        skipped["empty_minimal_windows"] += 1
+    return rows, skipped
+
+
+def inspect_window_budget(
+    db_path: str,
+    limit: Optional[int] = None,
+    chars_per_token: float = 4.0,
+    preview: int = 5,
+) -> Dict[str, Any]:
+    skipped = Counter()
+    rows: List[Dict[str, Any]] = []
+    calls = 0
+    episodes = 0
+
+    for _, episode, error in iter_episodes(db_path, limit=limit):
+        calls += 1
+        if error:
+            skipped[error] += 1
+            continue
+        assert episode is not None
+        episodes += 1
+        if episode["quality"]["skip"]:
+            skipped[episode["quality"]["skip_reason"]] += 1
+            continue
+        episode_rows, episode_skipped = minimal_window_units_for_episode(
+            episode,
+            chars_per_token=chars_per_token,
+        )
+        skipped.update(episode_skipped)
+        rows.extend(episode_rows)
+
+    units = [row["estimated_min_units"] for row in rows]
+    sorted_rows = sorted(rows, key=lambda row: row["estimated_min_units"], reverse=True)
+    return {
+        "calls": calls,
+        "episodes": episodes,
+        "assistant_targets": len(rows),
+        "token_budget_mode": "json_char_count_divisor",
+        "chars_per_token": chars_per_token,
+        "description": "Minimum estimated --max-seq-len to keep fixed prefix plus at least the target assistant turn. If the target calls tools, its immediate tool results are included as one complete turn.",
+        "recommended_min_max_seq_len": max(units) if units else None,
+        "p50_min_max_seq_len": percentile(units, 50),
+        "p90_min_max_seq_len": percentile(units, 90),
+        "p95_min_max_seq_len": percentile(units, 95),
+        "p99_min_max_seq_len": percentile(units, 99),
+        "skipped": dict(skipped),
+        "largest_targets": sorted_rows[:preview],
+    }
+
+
+def inspect_dataset(
+    db_path: str,
+    limit: Optional[int] = None,
+    preview: int = 3,
+    include_window_budget: bool = False,
+    chars_per_token: float = 4.0,
+) -> Dict[str, Any]:
     report: Dict[str, Any] = {
         "db_path": db_path,
         "calls": 0,
@@ -496,6 +620,13 @@ def inspect_dataset(db_path: str, limit: Optional[int] = None, preview: int = 3)
 
     for key in ("protocols", "providers", "models", "skip_reasons", "message_types", "roles", "tool_names", "harness_modes"):
         report[key] = dict(report[key])
+    if include_window_budget:
+        report["window_budget"] = inspect_window_budget(
+            db_path,
+            limit=limit,
+            chars_per_token=chars_per_token,
+            preview=preview,
+        )
     return report
 
 
@@ -1308,6 +1439,8 @@ def main() -> None:
     inspect_p = sub.add_parser("inspect", help="Inspect exportability and print a JSON report")
     inspect_p.add_argument("--preview", type=int, default=3, help="Number of episode previews")
     inspect_p.add_argument("--limit", type=int, default=None, help="Limit number of calls read")
+    inspect_p.add_argument("--window-budget", action="store_true", help="Estimate minimum max_seq_len for openai_windowed exports")
+    inspect_p.add_argument("--chars-per-token", type=float, default=4.0, help="Heuristic character/token divisor for window budget estimates")
 
     export_p = sub.add_parser("export", help="Export dataset")
     export_p.add_argument("--out", required=True, help="Output JSONL path")
@@ -1324,7 +1457,13 @@ def main() -> None:
     db_path = os.path.abspath(os.path.expanduser(args.db))
 
     if args.command == "inspect":
-        print_json(inspect_dataset(db_path, limit=args.limit, preview=args.preview))
+        print_json(inspect_dataset(
+            db_path,
+            limit=args.limit,
+            preview=args.preview,
+            include_window_budget=args.window_budget,
+            chars_per_token=args.chars_per_token,
+        ))
     elif args.command == "export":
         if args.format == "sharegpt":
             result = export_sharegpt_dataset(

@@ -253,6 +253,8 @@ python export_harness_dataset.py --db calls.db inspect
 |------|--------|------|
 | `--preview N` | `3` | 输出前 N 条 episode 预览，用于快速检查消息、工具和模型分布。 |
 | `--limit N` | 不限制 | 只读取前 N 条调用；参数写在 `inspect` 后面，例如 `inspect --limit 100`。 |
+| `--window-budget` | 关闭 | 估算 `openai_windowed` 至少需要多大的 `--max-seq-len`，才能保留完整固定前缀和至少一轮 assistant 目标。 |
+| `--chars-per-token N` | `4.0` | 配合 `--window-budget` 使用，无 tokenizer 时的字符/token 估算除数。 |
 
 `export` 参数：
 

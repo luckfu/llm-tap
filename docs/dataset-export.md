@@ -226,6 +226,26 @@ python export_harness_dataset.py export \
 - 以 assistant 决策点为目标滑窗，可以让每一步工具调用和最终回复都成为训练目标
 - 训练框架通常会对 assistant 之前的上下文做 loss mask，只对 assistant 生成部分计算 loss
 
+`--max-seq-len` 对会话层级的影响：
+
+`--max-seq-len` 越大，每个 window 的预算越多，通常能保留更多最近的会话层级，例如更多组 `assistant -> tool` 历史、更多工具返回内容，以及更少被压缩的 system 前缀。反过来，`--max-seq-len` 越小，导出器越倾向于只保留固定前缀、当前目标 assistant，以及离目标最近的一两轮工具交互。
+
+这意味着：
+
+- 更大的 `--max-seq-len` 会提升上下文完整度，更接近真实长任务运行轨迹。
+- 更大的 `--max-seq-len` 会增加训练显存、训练时间和 token 成本。
+- 当前长度是启发式估算，不等于目标模型 tokenizer 的真实 token 数。
+- `--prefix-budget-ratio` 会限制固定前缀最多占多少预算，避免超长 system prompt 把最近历史全部挤掉。
+
+例如在硬件允许时，可以导出 8192 估算窗口：
+
+```bash
+python export_harness_dataset.py export \
+  --format openai_windowed \
+  --max-seq-len 8192 \
+  --out data/openai_windowed_8192.jsonl
+```
+
 token 预算说明：
 
 导出器不知道最终被训练模型的 tokenizer，所以不能精确计算 token。当前实现使用启发式估算：
@@ -265,12 +285,24 @@ estimated_units = JSON 字符数 / --chars-per-token
 |------|--------|------|
 | `--preview N` | `3` | 输出前 N 条 episode 预览。 |
 | `--limit N` | 不限制 | 只读取前 N 条调用。 |
+| `--window-budget` | 关闭 | 估算 `openai_windowed` 至少需要多大的 `--max-seq-len`，才能保留完整固定前缀和至少一轮 assistant 目标。 |
+| `--chars-per-token N` | `4.0` | 配合 `--window-budget` 使用，无 tokenizer 时的字符/token 估算除数。 |
 
 示例：
 
 ```bash
 python export_harness_dataset.py inspect --preview 5 --limit 100
 ```
+
+估算窗口最小需求：
+
+```bash
+python export_harness_dataset.py inspect --window-budget --preview 5
+```
+
+报告中的 `window_budget.recommended_min_max_seq_len` 表示：在当前 `--chars-per-token` 估算口径下，为了完整保留固定前缀，并且至少包含一个当前 assistant 目标轮次，数据集中最难容纳的样本大约需要的 `--max-seq-len`。如果目标 assistant 触发了工具调用，估算会把紧随其后的 tool 结果也算进这一轮。
+
+这个值通常会明显大于实际导出时设置的 `--max-seq-len`，因为 `openai_windowed` 在预算不足时会压缩 system 前缀和长工具输出。它的用途是帮助判断：如果完全不压缩关键前缀和一轮会话，硬件大概要承受多长的窗口。
 
 `export` 子命令：
 

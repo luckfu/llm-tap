@@ -253,6 +253,8 @@ Global options:
 |--------|---------|-------------|
 | `--preview N` | `3` | Print N episode previews for a quick check of messages, tools, and model distribution. |
 | `--limit N` | unlimited | Read only the first N calls. Put it after `inspect`, for example `inspect --limit 100`. |
+| `--window-budget` | off | Estimate the minimum `--max-seq-len` needed by `openai_windowed` to keep the full fixed prefix plus at least one assistant target turn. |
+| `--chars-per-token N` | `4.0` | Used with `--window-budget`; heuristic character/token divisor when no tokenizer is available. |
 
 `export` options:
 
