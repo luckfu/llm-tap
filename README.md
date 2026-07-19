@@ -395,17 +395,21 @@ To accept LAN or other non-loopback connections, both a dedicated proxy token an
 
 Remote proxy requests must additionally send `X-LLM-Tap-Token: proxy-secret`. This header is never forwarded upstream, leaving `Authorization` or `x-api-key` available for the real provider credential. Then open `http://host:12345/?token=change-me` once to set the browser cookie. Web API clients can also send `Authorization: Bearer change-me`.
 
-### Call List
+### Filter and select calls
 
-![Call List](docs/screenshots/overview-en.png)
+![Call list with database-driven filters, time range, and explicit record selection](docs/screenshots/overview-en.png)
 
 ### Call Detail
 
-![Call Detail](docs/screenshots/detail-en.png)
+![Call detail with metadata and collapsible request, response, and sanitized headers](docs/screenshots/detail-en.png)
 
 ### Statistics Overview
 
-![Statistics Overview](docs/screenshots/stats-en.png)
+![Statistics overview by host, protocol, and model](docs/screenshots/stats-en.png)
+
+### Export Selected Records
+
+![Training data export for explicitly selected calls](docs/screenshots/export-en.png)
 
 ## FAQ
 
