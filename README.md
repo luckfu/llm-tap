@@ -17,6 +17,10 @@ Change the client's LLM request URL from `https://api.xxx.com` to `http://127.0.
 
 The normal workflow is: **start the proxy -> point the client at the proxy -> use the client normally -> select calls in the Web UI -> inspect and export**. Raw captures stay in the active data directory; generated datasets are separate export files.
 
+## Community
+
+- [Discuss llm-tap on LINUX DO](https://linux.do/t/topic/2614142)
+
 ## How It Works
 
 ```
