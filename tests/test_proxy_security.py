@@ -116,13 +116,17 @@ class BindPolicyTests(unittest.TestCase):
         self.assertEqual(server.bind, "127.0.0.1")
         self.assertEqual(server.app._client_max_size, 2_000_000)
 
-    def test_remote_bind_requires_dedicated_token_and_allowlist(self):
-        with self.assertRaisesRegex(ValueError, "proxy_tokens"):
+    def test_remote_bind_requires_allowlist_but_not_token(self):
+        with self.assertRaisesRegex(ValueError, "upstream_allowlist"):
             ProxyServer(self._config_file({}), bind="0.0.0.0")
-        with self.assertRaisesRegex(ValueError, "proxy_tokens"):
-            ProxyServer(self._config_file({"proxy_tokens": [""]}), bind="0.0.0.0")
         with self.assertRaisesRegex(ValueError, "upstream_allowlist"):
             ProxyServer(self._config_file({"proxy_tokens": ["secret"]}), bind="0.0.0.0")
+
+    def test_remote_bind_accepts_allowlist_without_token(self):
+        server = ProxyServer(self._config_file({
+            "upstream_allowlist": ["api.openai.com"],
+        }), bind="0.0.0.0")
+        self.assertEqual(server.bind, "0.0.0.0")
 
     def test_remote_bind_accepts_complete_policy(self):
         server = ProxyServer(self._config_file({

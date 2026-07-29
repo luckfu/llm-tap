@@ -395,11 +395,11 @@ class ProxyServer:
         if self.request_max_bytes <= 0:
             raise ValueError("request_max_bytes must be greater than zero")
         self.upstream_allowlist = list(self.config.get("upstream_allowlist") or [])
-        if not _is_loopback_host(self.bind):
-            if not _configured_proxy_tokens(self.config):
-                raise ValueError("non-loopback bind requires proxy_tokens in config.json")
-            if not self.upstream_allowlist:
-                raise ValueError("non-loopback bind requires upstream_allowlist in config.json")
+        # 转发通道默认不设 token：上游真实凭证由客户端自带，蹭转发不会消耗本机费用。
+        # 仅当绑定到非回环地址时，要求 upstream_allowlist 以避免本机被当作任意站点的开放跳板。
+        # 需要限制谁能转发时，可在 config.json 额外配置 proxy_tokens（可选）。
+        if not _is_loopback_host(self.bind) and not self.upstream_allowlist:
+            raise ValueError("non-loopback bind requires upstream_allowlist in config.json")
         self.app = web.Application(client_max_size=self.request_max_bytes)
         self.save_queue_max = int(self.config.get("save_queue_max", 1000))
         self.save_batch_size = int(self.config.get("save_batch_size", 20))

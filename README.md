@@ -374,13 +374,13 @@ Canonical, ShareGPT, tool SFT, and OpenAI exports support **Limit context per re
 
 The proxy listens on `127.0.0.1` by default. Data browsing is protected separately from transparent forwarding; without `ui_tokens`, the Web UI and `/api/*` data endpoints are only available from local loopback.
 
-To accept LAN or other non-loopback connections, both a dedicated proxy token and an upstream allowlist are required:
+To accept LAN or other non-loopback connections, only an upstream allowlist is required. A dedicated proxy token (`proxy_tokens`) is optional — add it if you want to restrict who may forward through this instance:
 
 ```json
 {
   "bind": "0.0.0.0",
-  "proxy_tokens": ["proxy-secret"],
   "upstream_allowlist": ["api.openai.com", "*.example.com"],
+  "proxy_tokens": ["proxy-secret"],
   "ui_tokens": ["change-me"],
   "upstream_conn_limit": 1000,
   "upstream_conn_limit_per_host": 0,
@@ -395,7 +395,7 @@ To accept LAN or other non-loopback connections, both a dedicated proxy token an
 }
 ```
 
-Remote proxy requests must additionally send `X-LLM-Tap-Token: proxy-secret`. This header is never forwarded upstream, leaving `Authorization` or `x-api-key` available for the real provider credential. Then open `http://host:12345/?token=change-me` once to set the browser cookie. Web API clients can also send `Authorization: Bearer change-me`.
+When `proxy_tokens` is configured, remote proxy requests must additionally send `X-LLM-Tap-Token: proxy-secret`. This header is never forwarded upstream, leaving `Authorization` or `x-api-key` available for the real provider credential. Then open `http://host:12345/?token=change-me` once to set the browser cookie. Web API clients can also send `Authorization: Bearer change-me`.
 
 ### Call Detail
 

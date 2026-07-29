@@ -10,6 +10,7 @@ data/
 .vscode/
 .claude/
 .codex/
+.qoder/
 
 # PyInstaller build artifacts
 build/

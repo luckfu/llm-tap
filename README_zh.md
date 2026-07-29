@@ -378,13 +378,13 @@ Canonical、ShareGPT、tool SFT 和 OpenAI 格式都支持“限制每条记录�
 
 代理默认只监听 `127.0.0.1`。数据浏览访问控制和透明转发是分开的；未配置 `ui_tokens` 时，Web 管理界面和 `/api/*` 数据接口只允许本机回环地址访问。
 
-需要从局域网或其他非回环地址访问时，必须同时配置独立代理令牌和上游白名单：
+需要从局域网或其他非回环地址访问时，只需配置上游白名单。独立代理令牌（`proxy_tokens`）是可选的——如果想限制谁能通过本实例转发，再添加它：
 
 ```json
 {
   "bind": "0.0.0.0",
-  "proxy_tokens": ["proxy-secret"],
   "upstream_allowlist": ["api.openai.com", "*.example.com"],
+  "proxy_tokens": ["proxy-secret"],
   "ui_tokens": ["change-me"],
   "upstream_conn_limit": 1000,
   "upstream_conn_limit_per_host": 0,
@@ -399,7 +399,7 @@ Canonical、ShareGPT、tool SFT 和 OpenAI 格式都支持“限制每条记录�
 }
 ```
 
-远程代理请求必须额外发送 `X-LLM-Tap-Token: proxy-secret`；该请求头不会转发给上游，因此原有的 `Authorization` 或 `x-api-key` 仍用于真实服务商认证。然后访问一次 `http://host:12345/?token=change-me` 写入浏览器 cookie。Web API 客户端也可以发送 `Authorization: Bearer change-me`。
+配置了 `proxy_tokens` 时，远程代理请求必须额外发送 `X-LLM-Tap-Token: proxy-secret`；该请求头不会转发给上游，因此原有的 `Authorization` 或 `x-api-key` 仍用于真实服务商认证。然后访问一次 `http://host:12345/?token=change-me` 写入浏览器 cookie。Web API 客户端也可以发送 `Authorization: Bearer change-me`。
 
 ### 调用详情
 
