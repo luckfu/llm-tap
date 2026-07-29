@@ -80,8 +80,9 @@ def _save_proxy_config(path: str, config: dict) -> None:
 
 
 def _parse_allowlist(text: str) -> list:
-    """Split a comma/space separated host list into clean entries."""
-    parts = str(text or "").replace("\uff0c", ",").replace(" ", ",").split(",")
+    """Split a newline/comma/space separated host list into clean entries."""
+    import re
+    parts = re.split(r"[,\uff0c\s]+", str(text or ""))
     return [p.strip() for p in parts if p.strip()]
 
 
@@ -336,7 +337,7 @@ class TrayApp:
         """
         config = _load_proxy_config(os.path.join(self.data_dir, "config.json"))
         remote_default = str(config.get("bind") or "") not in ("", "127.0.0.1", "localhost")
-        allowlist_default = ", ".join(config.get("upstream_allowlist") or [])
+        allowlist_default = "\n".join(config.get("upstream_allowlist") or [])
         ui_tokens = config.get("ui_tokens") or []
         ui_token_default = str(ui_tokens[0]) if ui_tokens else ""
         if sys.platform == "darwin":
@@ -436,7 +437,7 @@ def _run_settings_dialog_tk(*, port_default: str, data_dir_default: str,
 
     root = tk.Tk()
     root.title("llm-tap Settings")
-    root.geometry("560x330")
+    root.geometry("560x420")
     root.resizable(False, False)
 
     body = ttk.Frame(root, padding=18)
@@ -469,13 +470,15 @@ def _run_settings_dialog_tk(*, port_default: str, data_dir_default: str,
     )
     remote_check.grid(row=3, column=0, columnspan=3, sticky="w", pady=(0, 6))
 
-    ttk.Label(body, text="Allowed Upstreams:").grid(row=4, column=0, sticky="w", pady=(4, 2))
-    allowlist_var = tk.StringVar(value=allowlist_default)
-    allowlist_entry = ttk.Entry(body, textvariable=allowlist_var, width=46)
-    allowlist_entry.grid(row=4, column=1, columnspan=2, sticky="ew", pady=(4, 2))
+    ttk.Label(body, text="Allowed Upstreams:").grid(row=4, column=0, sticky="nw", pady=(4, 2))
+    allowlist_text = tk.Text(body, width=46, height=5, wrap="none",
+                             font=("TkDefaultFont",), highlightthickness=1, relief="solid", borderwidth=1)
+    allowlist_text.insert("1.0", allowlist_default)
+    allowlist_text.grid(row=4, column=1, columnspan=2, sticky="ew", pady=(4, 2))
     ttk.Label(
         body,
-        text="Provider hosts the proxy may forward to, e.g. api.openai.com, *.example.com",
+        text="Provider hosts the proxy may forward to, one per line (or comma separated),\n"
+             "e.g. api.openai.com or *.example.com",
         foreground="gray",
     ).grid(row=5, column=1, columnspan=2, sticky="w", pady=(0, 6))
 
@@ -496,7 +499,7 @@ def _run_settings_dialog_tk(*, port_default: str, data_dir_default: str,
             "port": port_var.get(),
             "data_dir": data_dir_var.get(),
             "remote": bool(remote_var.get()),
-            "allowlist": allowlist_var.get(),
+            "allowlist": allowlist_text.get("1.0", "end"),
             "ui_token": ui_token_var.get(),
         }
         root.destroy()
@@ -508,7 +511,13 @@ def _run_settings_dialog_tk(*, port_default: str, data_dir_default: str,
     btns.pack(pady=10)
     ttk.Button(btns, text="OK", command=ok).pack(side="left", padx=8)
     ttk.Button(btns, text="Cancel", command=cancel).pack(side="left", padx=8)
-    root.bind("<Return>", lambda _event: ok())
+    def on_return(event):
+        # Enter inside the allowlist box inserts a newline instead of submitting.
+        if event.widget is allowlist_text:
+            return
+        ok()
+
+    root.bind("<Return>", on_return)
     root.bind("<Escape>", lambda _event: cancel())
     root.protocol("WM_DELETE_WINDOW", cancel)
     root.mainloop()
