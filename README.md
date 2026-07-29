@@ -374,7 +374,7 @@ Canonical, ShareGPT, tool SFT, and OpenAI exports support **Limit context per re
 
 The proxy listens on `127.0.0.1` by default. Data browsing is protected separately from transparent forwarding; without `ui_tokens`, the Web UI and `/api/*` data endpoints are only available from local loopback.
 
-To accept LAN or other non-loopback connections, only an upstream allowlist is required. A dedicated proxy token (`proxy_tokens`) is optional — add it if you want to restrict who may forward through this instance:
+To accept LAN or other non-loopback connections, only an upstream allowlist is required. The upstream allowlist (`upstream_allowlist`) restricts forwarding to the provider domains you list, preventing strangers from using your machine as a relay to arbitrary sites; it is a server-side-only setting and requires no client changes. A dedicated proxy token (`proxy_tokens`) is optional — add it if you want to restrict who may forward through this instance:
 
 ```json
 {
