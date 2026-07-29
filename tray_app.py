@@ -63,6 +63,28 @@ def _save_settings(settings: dict) -> None:
         json.dump(settings, f, ensure_ascii=False, indent=2)
 
 
+def _load_proxy_config(path: str) -> dict:
+    """Read the proxy's config.json, tolerating a missing or broken file."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data if isinstance(data, dict) else {}
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def _save_proxy_config(path: str, config: dict) -> None:
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(config, f, ensure_ascii=False, indent=2)
+
+
+def _parse_allowlist(text: str) -> list:
+    """Split a comma/space separated host list into clean entries."""
+    parts = str(text or "").replace("\uff0c", ",").replace(" ", ",").split(",")
+    return [p.strip() for p in parts if p.strip()]
+
+
 class TrayApp:
     def __init__(self, port: int = DEFAULT_PORT, data_dir: str = DEFAULT_DATA_DIR):
         self.port = port
@@ -243,7 +265,8 @@ class TrayApp:
         webbrowser.open(f"http://127.0.0.1:{self.port}/")
 
     def _open_settings(self, icon, item) -> None:
-        """Open a settings dialog to configure the port and data directory.
+        """Open a settings dialog to configure the port, data directory and
+        remote access policy (bind / upstream_allowlist / ui_tokens).
         """
         values = self._settings_dialog()
         if values is None:
@@ -268,14 +291,41 @@ class TrayApp:
             self._alert(f"Cannot use data directory: {e}")
             return
 
+        remote = bool(values.get("remote"))
+        allowlist = _parse_allowlist(values.get("allowlist", ""))
+        ui_token = str(values.get("ui_token") or "").strip()
+        if remote and not allowlist:
+            self._alert("Remote access needs at least one allowed upstream host, e.g. api.openai.com.")
+            return
+
+        config_path = os.path.join(data_dir, "config.json")
+        config = _load_proxy_config(config_path)
+        new_config = dict(config)
+        if remote:
+            new_config["bind"] = "0.0.0.0"
+        else:
+            new_config.pop("bind", None)
+        if allowlist:
+            new_config["upstream_allowlist"] = allowlist
+        else:
+            new_config.pop("upstream_allowlist", None)
+        if ui_token:
+            new_config["ui_tokens"] = [ui_token]
+        else:
+            new_config.pop("ui_tokens", None)
+
         port_changed = p != self.port
         data_dir_changed = data_dir != self.data_dir
-        if port_changed or data_dir_changed:
-            self._restart_proxy(p, data_dir)
-            settings = _load_settings()
-            settings.update({"port": p, "data_dir": data_dir})
-            _save_settings(settings)
-            self._alert("Settings saved. Proxy restarted.")
+        config_changed = new_config != config
+        if not (port_changed or data_dir_changed or config_changed):
+            return
+        if config_changed:
+            _save_proxy_config(config_path, new_config)
+        self._restart_proxy(p, data_dir)
+        settings = _load_settings()
+        settings.update({"port": p, "data_dir": data_dir})
+        _save_settings(settings)
+        self._alert("Settings saved. Proxy restarted.")
 
     def _settings_dialog(self):
         """Show the settings window.
@@ -284,17 +334,31 @@ class TrayApp:
         helper-process dialog there. Windows/Linux can show Tk directly in the
         current process.
         """
+        config = _load_proxy_config(os.path.join(self.data_dir, "config.json"))
+        remote_default = str(config.get("bind") or "") not in ("", "127.0.0.1", "localhost")
+        allowlist_default = ", ".join(config.get("upstream_allowlist") or [])
+        ui_tokens = config.get("ui_tokens") or []
+        ui_token_default = str(ui_tokens[0]) if ui_tokens else ""
         if sys.platform == "darwin":
-            return self._settings_dialog_mac()
-        return _run_settings_dialog_tk(port_default=str(self.port), data_dir_default=self.data_dir)
+            return self._settings_dialog_mac(remote_default, allowlist_default, ui_token_default)
+        return _run_settings_dialog_tk(
+            port_default=str(self.port),
+            data_dir_default=self.data_dir,
+            remote_default=remote_default,
+            allowlist_default=allowlist_default,
+            ui_token_default=ui_token_default,
+        )
 
-    def _settings_dialog_mac(self):
+    def _settings_dialog_mac(self, remote_default, allowlist_default, ui_token_default):
         """Show the settings window from a helper process on macOS."""
         import subprocess
 
         env = os.environ.copy()
         env["LLM_TAP_DIALOG_PORT"] = str(self.port)
         env["LLM_TAP_DIALOG_DATA_DIR"] = self.data_dir
+        env["LLM_TAP_DIALOG_REMOTE"] = "1" if remote_default else "0"
+        env["LLM_TAP_DIALOG_ALLOWLIST"] = allowlist_default
+        env["LLM_TAP_DIALOG_UI_TOKEN"] = ui_token_default
         cmd = [sys.executable, "--settings-dialog-tk"] if getattr(sys, "frozen", False) else [sys.executable, os.path.abspath(__file__), "--settings-dialog-tk"]
         try:
             r = subprocess.run(
@@ -348,6 +412,9 @@ def main() -> None:
         result = _run_settings_dialog_tk(
             port_default=os.environ.get("LLM_TAP_DIALOG_PORT", str(DEFAULT_PORT)),
             data_dir_default=os.environ.get("LLM_TAP_DIALOG_DATA_DIR", DEFAULT_DATA_DIR),
+            remote_default=os.environ.get("LLM_TAP_DIALOG_REMOTE") == "1",
+            allowlist_default=os.environ.get("LLM_TAP_DIALOG_ALLOWLIST", ""),
+            ui_token_default=os.environ.get("LLM_TAP_DIALOG_UI_TOKEN", ""),
         )
         if result is not None:
             sys.stdout.write(json.dumps(result, ensure_ascii=False))
@@ -358,7 +425,9 @@ def main() -> None:
     TrayApp(port=port, data_dir=data_dir).run()
 
 
-def _run_settings_dialog_tk(*, port_default: str, data_dir_default: str) -> dict | None:
+def _run_settings_dialog_tk(*, port_default: str, data_dir_default: str,
+                            remote_default: bool = False, allowlist_default: str = "",
+                            ui_token_default: str = "") -> dict | None:
     try:
         import tkinter as tk
         from tkinter import ttk, filedialog
@@ -367,7 +436,7 @@ def _run_settings_dialog_tk(*, port_default: str, data_dir_default: str) -> dict
 
     root = tk.Tk()
     root.title("llm-tap Settings")
-    root.geometry("560x210")
+    root.geometry("560x330")
     root.resizable(False, False)
 
     body = ttk.Frame(root, padding=18)
@@ -392,10 +461,44 @@ def _run_settings_dialog_tk(*, port_default: str, data_dir_default: str) -> dict
 
     ttk.Button(body, text="Browse...", command=browse).grid(row=1, column=2, padx=(8, 0), pady=(8, 6))
 
+    ttk.Separator(body, orient="horizontal").grid(row=2, column=0, columnspan=3, sticky="ew", pady=(12, 8))
+
+    remote_var = tk.BooleanVar(value=remote_default)
+    remote_check = ttk.Checkbutton(
+        body, text="Allow remote access (listen on all interfaces)", variable=remote_var
+    )
+    remote_check.grid(row=3, column=0, columnspan=3, sticky="w", pady=(0, 6))
+
+    ttk.Label(body, text="Allowed Upstreams:").grid(row=4, column=0, sticky="w", pady=(4, 2))
+    allowlist_var = tk.StringVar(value=allowlist_default)
+    allowlist_entry = ttk.Entry(body, textvariable=allowlist_var, width=46)
+    allowlist_entry.grid(row=4, column=1, columnspan=2, sticky="ew", pady=(4, 2))
+    ttk.Label(
+        body,
+        text="Provider hosts the proxy may forward to, e.g. api.openai.com, *.example.com",
+        foreground="gray",
+    ).grid(row=5, column=1, columnspan=2, sticky="w", pady=(0, 6))
+
+    ttk.Label(body, text="Web UI Token:").grid(row=6, column=0, sticky="w", pady=(4, 2))
+    ui_token_var = tk.StringVar(value=ui_token_default)
+    ui_token_entry = ttk.Entry(body, textvariable=ui_token_var, width=46)
+    ui_token_entry.grid(row=6, column=1, columnspan=2, sticky="ew", pady=(4, 2))
+    ttk.Label(
+        body,
+        text="Needed to browse captured data from another machine (optional)",
+        foreground="gray",
+    ).grid(row=7, column=1, columnspan=2, sticky="w")
+
     result = {"value": None}
 
     def ok():
-        result["value"] = {"port": port_var.get(), "data_dir": data_dir_var.get()}
+        result["value"] = {
+            "port": port_var.get(),
+            "data_dir": data_dir_var.get(),
+            "remote": bool(remote_var.get()),
+            "allowlist": allowlist_var.get(),
+            "ui_token": ui_token_var.get(),
+        }
         root.destroy()
 
     def cancel():
