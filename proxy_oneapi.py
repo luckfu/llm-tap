@@ -389,6 +389,7 @@ class ProxyServer:
         self.bind = bind or self.config.get("bind") or "127.0.0.1"
         self.port = port
         self.log_level = log_level
+        self.log_path = os.path.abspath(self.config.get("log_file", "proxy.log"))
         self.runner: Optional[web.AppRunner] = None
         self.session: Optional[aiohttp.ClientSession] = None
         self.raw_writer: Optional[RawCallWriter] = None
@@ -412,7 +413,7 @@ class ProxyServer:
         self.app.on_startup.append(self.init_async_resources)
 
     async def init_async_resources(self, app):
-        await asyncio.to_thread(init_async_logger, "proxy", "proxy.log",
+        await asyncio.to_thread(init_async_logger, "proxy", self.log_path,
                                 getattr(logging, self.log_level.upper()))
         self.async_logger = get_async_logger()
         await self.async_logger.info("Async logger initialized")
@@ -884,6 +885,38 @@ class ProxyServer:
         resp = web.Response(text=INDEX_HTML, content_type="text/html")
         _maybe_set_ui_cookie(resp, request, self.config)
         return resp
+
+    async def handle_api_logs(self, request: web.Request) -> web.Response:
+        """Return the most recent proxy log lines for the Web UI."""
+        if not verify_ui_auth(request, self.config):
+            return _ui_unauthorized_json()
+        try:
+            limit = max(1, min(5000, int(request.query.get("limit", "500"))))
+        except ValueError:
+            return web.json_response({"error": "limit must be an integer"}, status=400)
+        try:
+            lines = await asyncio.to_thread(self._read_log_tail, limit)
+        except OSError as exc:
+            return web.json_response({"error": f"failed to read log: {exc}"}, status=500)
+        return web.json_response({"lines": lines, "path": self.log_path, "limit": limit})
+
+    def _read_log_tail(self, limit: int) -> list[str]:
+        if not os.path.exists(self.log_path):
+            return []
+        with open(self.log_path, "r", encoding="utf-8", errors="replace") as log_file:
+            return [line.rstrip("\r\n") for line in log_file.readlines()[-limit:]]
+
+    async def handle_api_logs_delete(self, request: web.Request) -> web.Response:
+        """Clear the active proxy log without stopping the service."""
+        if not verify_ui_auth(request, self.config):
+            return _ui_unauthorized_json()
+        if self.async_logger is None:
+            return web.json_response({"error": "logger is not ready"}, status=503)
+        try:
+            await asyncio.to_thread(self.async_logger.clear_file)
+        except OSError as exc:
+            return web.json_response({"error": f"failed to clear log: {exc}"}, status=500)
+        return web.json_response({"cleared": True})
 
     async def handle_api_calls(self, request: web.Request) -> web.Response:
         """调用列表 API：支持分页、筛选"""
@@ -1789,6 +1822,10 @@ button:disabled { opacity: .5; cursor: not-allowed; transform: none; }
 .detail-section summary { padding: 12px 14px; color: #4b5a60; background: var(--surface-soft); cursor: pointer; user-select: none; font-size: 12px; font-weight: 700; text-transform: uppercase; }
 .detail-section summary:hover { color: var(--accent); }
 .detail-section pre { max-width: 100%; padding: 16px; overflow-x: auto; color: #304047; background: #f7f9f8; font: 12px/1.65 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+.log-toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+.log-toolbar select { width: auto; min-width: 110px; }
+.log-toolbar .log-path { margin-right: auto; color: var(--muted); font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; overflow-wrap: anywhere; }
+.log-viewer { min-height: 420px; max-height: calc(100vh - 260px); margin: 0; padding: 16px; overflow: auto; color: #d8e4e1; background: #172126; border-radius: 8px; font: 12px/1.65 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
 @media (max-width: 1080px) {
   .filters { grid-template-columns: repeat(4, minmax(0, 1fr)); }
   .filters button { grid-column: span 4; }
@@ -1877,6 +1914,7 @@ button:disabled { opacity: .5; cursor: not-allowed; transform: none; }
       <button type="button" id="tab-list" class="nav-tab active" onclick="switchTab('list')" data-i18n="tabList">调用列表</button>
       <button type="button" id="tab-stats" class="nav-tab" onclick="switchTab('stats')" data-i18n="tabStats">统计概览</button>
       <button type="button" id="tab-export" class="nav-tab" onclick="switchTab('export')" data-i18n="tabExport">数据导出</button>
+      <button type="button" id="tab-logs" class="nav-tab" onclick="switchTab('logs')" data-i18n="tabLogs">运行日志</button>
     </nav>
     <div class="navbar-actions">
       <span class="capture-state" data-i18n="captureActive">本地采集中</span>
@@ -1952,6 +1990,23 @@ button:disabled { opacity: .5; cursor: not-allowed; transform: none; }
         <button id="btn-next" onclick="changePage(1)" data-i18n="nextPage">下一页</button>
       </div>
     </div>
+  </section>
+
+  <section id="view-logs" style="display:none">
+    <div class="view-header">
+      <div class="view-heading">
+        <span class="eyebrow" data-i18n="logsEyebrow">Diagnostics</span>
+        <h1 data-i18n="logsTitle">运行日志</h1>
+      </div>
+      <button type="button" id="logs-refresh" class="icon-btn" onclick="loadLogs()" data-i18n-title="refresh" title="刷新" aria-label="刷新">↻</button>
+    </div>
+    <div class="log-toolbar">
+      <span id="log-path" class="log-path"></span>
+      <label for="log-limit" data-i18n="logLines">行数</label>
+      <select id="log-limit" onchange="loadLogs()"><option value="200">200</option><option value="500" selected>500</option><option value="1000">1000</option><option value="5000">5000</option></select>
+      <button type="button" class="danger-btn" onclick="clearLogs()" data-i18n="clearLogs">清除日志</button>
+    </div>
+    <pre id="log-viewer" class="log-viewer" data-i18n="loading">加载中...</pre>
   </section>
 
   <section id="view-stats" style="display:none">
@@ -2090,9 +2145,10 @@ button:disabled { opacity: .5; cursor: not-allowed; transform: none; }
 const i18n = {
   zh: {
     title: '数据采集', brandProduct: '采集控制台', captureActive: '本地采集中',
-    tabList: '调用列表', tabStats: '统计概览', tabExport: '数据导出',
+    tabList: '调用列表', tabStats: '统计概览', tabExport: '数据导出', tabLogs: '运行日志',
     callsEyebrow: '采集台账', callsTitle: '调用记录', statsEyebrow: '运行分析', statsTitle: '运行概览',
-    exportEyebrow: '数据集工作台', exportTitle: '训练数据导出', refresh: '刷新', close: '关闭',
+    exportEyebrow: '数据集工作台', exportTitle: '训练数据导出', logsEyebrow: '诊断工具', logsTitle: '运行日志', refresh: '刷新', close: '关闭',
+    logLines: '行数', clearLogs: '清除日志', clearLogsConfirm: '确定清除当前代理日志？', loading: '加载中...', logLoadFailed: '日志加载失败',
     allHosts: '全部 Host', allModels: '全部模型', allProtocols: '全部协议', allStatus: '全部状态', success: '成功', error: '失败',
     search: '查询', modelPh: '模型', startTime: '开始时间', endTime: '结束时间', clearTimeRange: '清除时间范围',
     invalidTimeRange: '开始时间不能晚于结束时间。', filterLoadFailed: '无法加载筛选选项',
@@ -2142,9 +2198,10 @@ const i18n = {
   },
   en: {
     title: 'Data Collection', brandProduct: 'Capture Console', captureActive: 'Capturing locally',
-    tabList: 'Calls', tabStats: 'Stats', tabExport: 'Export',
+    tabList: 'Calls', tabStats: 'Stats', tabExport: 'Export', tabLogs: 'Logs',
     callsEyebrow: 'Capture ledger', callsTitle: 'Call records', statsEyebrow: 'Operations', statsTitle: 'Run overview',
-    exportEyebrow: 'Dataset workspace', exportTitle: 'Training data export', refresh: 'Refresh', close: 'Close',
+    exportEyebrow: 'Dataset workspace', exportTitle: 'Training data export', logsEyebrow: 'Diagnostics', logsTitle: 'Runtime logs', refresh: 'Refresh', close: 'Close',
+    logLines: 'Lines', clearLogs: 'Clear logs', clearLogsConfirm: 'Clear the current proxy log?', loading: 'Loading...', logLoadFailed: 'Failed to load logs',
     allHosts: 'All Hosts', allModels: 'All Models', allProtocols: 'All Protocols', allStatus: 'All Status', success: 'Success', error: 'Error',
     search: 'Search', modelPh: 'Model', startTime: 'Start time', endTime: 'End time', clearTimeRange: 'Clear time range',
     invalidTimeRange: 'Start time cannot be after end time.', filterLoadFailed: 'Could not load filter options',
@@ -2752,18 +2809,53 @@ async function refreshExportView() {
   }
 }
 
+async function loadLogs() {
+  const button = document.getElementById('logs-refresh');
+  setBusy(button, true);
+  const viewer = document.getElementById('log-viewer');
+  try {
+    const limit = document.getElementById('log-limit').value;
+    const res = await fetch('/api/logs?limit=' + encodeURIComponent(limit));
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+    document.getElementById('log-path').textContent = data.path || '';
+    viewer.textContent = (data.lines || []).join('\n') || t('noData');
+    viewer.scrollTop = viewer.scrollHeight;
+  } catch (err) {
+    viewer.textContent = t('logLoadFailed') + ': ' + ((err && err.message) ? err.message : String(err));
+  } finally {
+    setBusy(button, false);
+  }
+}
+
+async function clearLogs() {
+  if (!confirm(t('clearLogsConfirm'))) return;
+  try {
+    const res = await fetch('/api/logs', {method: 'DELETE'});
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+    await loadLogs();
+  } catch (err) {
+    alert((err && err.message) ? err.message : String(err));
+  }
+}
+
 function switchTab(tab) {
   document.getElementById('view-list').style.display = tab === 'list' ? '' : 'none';
   document.getElementById('view-stats').style.display = tab === 'stats' ? '' : 'none';
   document.getElementById('view-export').style.display = tab === 'export' ? '' : 'none';
+  document.getElementById('view-logs').style.display = tab === 'logs' ? '' : 'none';
   document.getElementById('tab-list').classList.toggle('active', tab === 'list');
   document.getElementById('tab-stats').classList.toggle('active', tab === 'stats');
   document.getElementById('tab-export').classList.toggle('active', tab === 'export');
+  document.getElementById('tab-logs').classList.toggle('active', tab === 'logs');
   document.getElementById('tab-list').setAttribute('aria-current', tab === 'list' ? 'page' : 'false');
   document.getElementById('tab-stats').setAttribute('aria-current', tab === 'stats' ? 'page' : 'false');
   document.getElementById('tab-export').setAttribute('aria-current', tab === 'export' ? 'page' : 'false');
+  document.getElementById('tab-logs').setAttribute('aria-current', tab === 'logs' ? 'page' : 'false');
   sessionStorage.setItem('activeTab', tab);
   if (tab === 'stats') loadStats();
+  if (tab === 'logs') loadLogs();
   if (tab === 'export') {
     updateExportFields();
     updateSelectionUi();
@@ -2807,6 +2899,8 @@ switchTab(sessionStorage.getItem('activeTab') || 'list');
 def _register_routes(server: "ProxyServer") -> None:
     """Register frontend + proxy routes on a server instance."""
     server.app.router.add_get("/", server.handle_index)
+    server.app.router.add_get("/api/logs", server.handle_api_logs)
+    server.app.router.add_delete("/api/logs", server.handle_api_logs_delete)
     server.app.router.add_get("/api/calls", server.handle_api_calls)
     server.app.router.add_get("/api/filter-options", server.handle_api_filter_options)
     server.app.router.add_get("/api/call-ids", server.handle_api_call_ids)

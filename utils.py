@@ -23,6 +23,7 @@ logger.addHandler(logging.NullHandler())
 class AsyncLogger:
     def __init__(self, name: str, log_file: str, level=logging.DEBUG):
         self.queue = Queue()
+        self.log_file = log_file
         self.logger = logging.getLogger(name)
 
         if self.logger.handlers:
@@ -33,6 +34,7 @@ class AsyncLogger:
         self.logger.propagate = False
 
         file_handler = logging.FileHandler(log_file, encoding='utf-8')
+        self.file_handler = file_handler
         console_handler = logging.StreamHandler()
 
         formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
@@ -49,6 +51,17 @@ class AsyncLogger:
             respect_handler_level=True
         )
         self.listener.start()
+
+    def clear_file(self) -> None:
+        """Truncate the active log stream safely while the listener is running."""
+        self.file_handler.acquire()
+        try:
+            self.file_handler.flush()
+            self.file_handler.stream.seek(0)
+            self.file_handler.stream.truncate(0)
+            self.file_handler.stream.flush()
+        finally:
+            self.file_handler.release()
 
     async def info(self, msg: str):
         self.logger.info(msg)
