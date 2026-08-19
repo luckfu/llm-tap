@@ -18,3 +18,5 @@ dist/
 *.spec
 llm-tap-*.tar.gz
 llm-tap-*.zip
+calls.db-shm
+.gitignore
