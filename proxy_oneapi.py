@@ -1007,6 +1007,51 @@ class ProxyServer:
         await self.async_logger.info(f"Call deleted: {call_id}")
         return web.json_response({"deleted": call_id})
 
+    async def handle_api_calls_delete(self, request: web.Request) -> web.Response:
+        """批量删除调用记录及其 JSON 文件。"""
+        if not verify_ui_auth(request, self.config):
+            return _ui_unauthorized_json()
+        try:
+            payload = await request.json()
+        except (json.JSONDecodeError, aiohttp.ContentTypeError):
+            return web.json_response({"error": "request body must be JSON"}, status=400)
+        call_ids = payload.get("call_ids") if isinstance(payload, dict) else None
+        if not isinstance(call_ids, list) or not call_ids:
+            return web.json_response({"error": "select at least one call"}, status=400)
+        if len(call_ids) > MAX_SELECTED_CALLS:
+            return web.json_response({
+                "error": f"cannot delete more than {MAX_SELECTED_CALLS} calls at once"
+            }, status=400)
+        if any(not isinstance(call_id, str) or not call_id.strip() for call_id in call_ids):
+            return web.json_response({"error": "call_ids must contain non-empty strings"}, status=400)
+        call_ids = list(dict.fromkeys(call_ids))
+
+        placeholders = ",".join("?" for _ in call_ids)
+        async with aiosqlite.connect(self.db_path) as conn:
+            conn.row_factory = aiosqlite.Row
+            cursor = await conn.execute(
+                f"SELECT call_id, raw_path FROM calls WHERE call_id IN ({placeholders})",
+                call_ids,
+            )
+            rows = await cursor.fetchall()
+            if rows:
+                await conn.execute(
+                    f"DELETE FROM calls WHERE call_id IN ({placeholders})",
+                    call_ids,
+                )
+                await conn.commit()
+
+        deleted_ids = [row["call_id"] for row in rows]
+        for row in rows:
+            raw_path = row["raw_path"]
+            if raw_path and os.path.exists(raw_path):
+                try:
+                    os.remove(raw_path)
+                except OSError as e:
+                    await self.async_logger.warning(f"Failed to remove {raw_path}: {e}")
+        await self.async_logger.info(f"Calls deleted: {len(deleted_ids)}")
+        return web.json_response({"deleted": deleted_ids, "deleted_count": len(deleted_ids)})
+
     async def handle_api_stats(self, request: web.Request) -> web.Response:
         """统计概览 API"""
         if not verify_ui_auth(request, self.config):
@@ -1864,6 +1909,7 @@ button:disabled { opacity: .5; cursor: not-allowed; transform: none; }
       <button type="button" id="select-page-btn" onclick="selectCurrentPage()" data-i18n="selectPage">选择当前页</button>
       <button type="button" id="select-filtered-btn" onclick="selectFilteredCalls()" data-i18n="selectFiltered">选择全部筛选结果</button>
       <button type="button" id="clear-selection-btn" onclick="clearSelection()" data-i18n="clearSelection" disabled>清空</button>
+      <button type="button" id="delete-selected-btn" class="danger-btn" onclick="deleteSelectedCalls()" data-i18n="deleteSelected" disabled>删除所选</button>
       <button type="button" id="export-selected-btn" class="selection-primary" onclick="openSelectedExport()" data-i18n="exportSelected" disabled>导出所选</button>
     </div>
     <div class="table-wrap">
@@ -2038,6 +2084,7 @@ const i18n = {
     noData: '暂无数据',
     recordsSelected: '条记录已选择', selectPage: '选择当前页', selectFiltered: '选择全部筛选结果',
     clearSelection: '清空', exportSelected: '导出所选', changeSelection: '修改选择',
+    deleteSelected: '删除所选', deleteSelectedConfirm: count => `确定删除选中的 ${count} 条记录？`,
     selectionReady: count => `已选择 ${count} 条调用`, selectionReadyNote: '检查和导出仅处理这些明确选择的记录。',
     selectionEmpty: '尚未选择调用', selectionEmptyNote: '请先到调用列表选择要导出的记录。',
     selectFilteredConfirm: count => `选择当前筛选条件下的全部 ${count} 条记录？`,
@@ -2089,6 +2136,7 @@ const i18n = {
     noData: 'No data',
     recordsSelected: 'records selected', selectPage: 'Select page', selectFiltered: 'Select all filtered',
     clearSelection: 'Clear', exportSelected: 'Export selected', changeSelection: 'Change selection',
+    deleteSelected: 'Delete selected', deleteSelectedConfirm: count => `Delete the ${count} selected records?`,
     selectionReady: count => `${count} calls selected`, selectionReadyNote: 'Inspection and export process only these explicitly selected records.',
     selectionEmpty: 'No calls selected', selectionEmptyNote: 'Select the calls you want to export from the Calls view first.',
     selectFilteredConfirm: count => `Select all ${count} records matching the current filters?`,
@@ -2267,6 +2315,7 @@ function updateSelectionUi() {
   const count = selectedCallIds.size;
   document.getElementById('selected-count').textContent = count;
   document.getElementById('clear-selection-btn').disabled = count === 0;
+  document.getElementById('delete-selected-btn').disabled = count === 0;
   document.getElementById('export-selected-btn').disabled = count === 0;
 
   const scope = document.getElementById('selection-scope');
@@ -2333,6 +2382,32 @@ function clearSelection() {
   renderExportSummary(null);
   clearExportStatus();
   updateSelectionUi();
+}
+
+async function deleteSelectedCalls() {
+  const count = selectedCallIds.size;
+  if (!count || !confirm(t('deleteSelectedConfirm')(count))) return;
+  const button = document.getElementById('delete-selected-btn');
+  setBusy(button, true);
+  try {
+    const res = await fetch('/api/calls', {
+      method: 'DELETE',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({call_ids: selectedIds()}),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+    total = Math.max(0, total - (data.deleted_count || 0));
+    clearSelection();
+    currentPage = Math.min(currentPage, Math.max(1, Math.ceil(total / pageSize)));
+    await loadCalls();
+    if (document.getElementById('view-stats').style.display !== 'none') loadStats();
+  } catch (err) {
+    alert((err && err.message) ? err.message : String(err));
+  } finally {
+    setBusy(button, false);
+    updateSelectionUi();
+  }
 }
 
 function openSelectedExport() {
@@ -2716,6 +2791,7 @@ def _register_routes(server: "ProxyServer") -> None:
     server.app.router.add_get("/api/filter-options", server.handle_api_filter_options)
     server.app.router.add_get("/api/call-ids", server.handle_api_call_ids)
     server.app.router.add_get("/api/calls/{call_id}", server.handle_api_call_detail)
+    server.app.router.add_delete("/api/calls", server.handle_api_calls_delete)
     server.app.router.add_delete("/api/calls/{call_id}", server.handle_api_call_delete)
     server.app.router.add_get("/api/stats", server.handle_api_stats)
     server.app.router.add_post("/api/export/inspect", server.handle_api_export_inspect)
