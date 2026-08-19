@@ -2819,7 +2819,7 @@ async function loadLogs() {
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
     document.getElementById('log-path').textContent = data.path || '';
-    viewer.textContent = (data.lines || []).join('\n') || t('noData');
+    viewer.textContent = (data.lines || []).join('\\n') || t('noData');
     viewer.scrollTop = viewer.scrollHeight;
   } catch (err) {
     viewer.textContent = t('logLoadFailed') + ': ' + ((err && err.message) ? err.message : String(err));
