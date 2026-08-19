@@ -9,6 +9,7 @@ from proxy_oneapi import (
     SafeUpstreamResolver,
     _call_filter_clause,
     normalize_upstream_host,
+    should_persist_stream_response,
     upstream_host_allowed,
     verify_auth,
 )
@@ -63,6 +64,18 @@ class CallFilterTests(unittest.TestCase):
                 "start_time": "2026-07-18T14:00:00",
                 "end_time": "2026-07-18T13:00:00",
             })
+
+
+class StreamPersistenceTests(unittest.TestCase):
+    def test_responses_stream_requires_completed_event(self):
+        self.assertFalse(should_persist_stream_response("openai-responses", None))
+        self.assertTrue(should_persist_stream_response(
+            "openai-responses", {"id": "resp_123", "status": "completed"}
+        ))
+
+    def test_other_stream_protocols_do_not_use_responses_terminal_event(self):
+        self.assertTrue(should_persist_stream_response("openai-chat", None))
+        self.assertTrue(should_persist_stream_response("anthropic-messages", None))
 
 
 class ResolverTests(unittest.IsolatedAsyncioTestCase):

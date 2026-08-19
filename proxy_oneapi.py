@@ -122,6 +122,11 @@ def is_error_response_body(body: Any) -> bool:
     return False
 
 
+def should_persist_stream_response(protocol: str, completed_response: Any) -> bool:
+    """Only persist a Responses stream after its terminal event was captured."""
+    return protocol != "openai-responses" or completed_response is not None
+
+
 # ========== 认证校验 ==========
 
 def verify_auth(request: web.Request, config: dict) -> bool:
@@ -691,6 +696,16 @@ class ProxyServer:
                 except Exception as e:
                     await self.async_logger.error(f"Stream processing error: {e}")
                     continue
+
+            # Responses API 必须以 response.completed 作为完整响应边界。
+            # 缺少该事件通常意味着上游流被截断、格式不兼容或请求失败；
+            # 透传已经收到的内容，但不要把占位 note 当作训练数据持久化。
+            if not should_persist_stream_response(protocol, completed_response):
+                await self.async_logger.warning(
+                    f"Skip saving incomplete Responses stream: {call_id}, "
+                    "no response.completed captured"
+                )
+                return response
 
             # 获取整合结果
             if merger:
