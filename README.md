@@ -202,6 +202,12 @@ Anthropic's `thinking` block (with `signature`), `tool_use` block, `tool_result`
 
 For the full export design, processing rules, sliding-window strategy, and parameter reference, see [Dataset Export Design](docs/dataset-export.md).
 
+### Protocol-specific normalization
+
+- OpenAI Responses requests with a string `input` are exported as one user message. Structured input arrays continue to preserve message, reasoning, tool-call, and tool-result items.
+- Anthropic content blocks are normalized without flattening away meaning: text, `thinking`/`redacted_thinking` (including signatures), `tool_use`, and `tool_result` remain distinct canonical messages. The OpenAI and `tool_sft` exporters then compile the tool trajectory into `assistant.tool_calls` and `role=tool` messages.
+- An assistant turn containing only a tool call is still a valid assistant output and is not rejected by the default quality filter.
+
 ### Choose an output format
 
 | Format | Choose it when |

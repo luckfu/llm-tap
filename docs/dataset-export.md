@@ -51,6 +51,16 @@
 
 这样做的好处是：原始协议只需要解析一次，后续可以继续增加新的导出格式。
 
+### 协议归一化规则
+
+导出器会先把不同协议转换为 canonical 消息，再交给各训练格式适配器：
+
+- Responses API 的 `request.input` 支持字符串、单个结构化 item 和 item 数组。字符串会作为一条 `role=user` 消息写入，不能按可迭代对象逐字符拆分。
+- Anthropic 的 content block 会按语义拆分：普通文本是 `message`，`thinking`/`redacted_thinking` 是 `reasoning`（保留 `signature` 和原始 block），`tool_use` 是 `tool_call`，`tool_result` 是 `role=tool` 的 `tool_result`。
+- 只有 `tool_call` 的 assistant 回合也计入 `has_assistant_message`，因此不会因为没有可见文本而被默认质量规则跳过。
+
+随后，OpenAI 和 `tool_sft` 格式会把相邻的 assistant reasoning/tool call 合并为结构化 assistant 消息，并保留对应的 `tool_call_id` 和工具结果。需要审计协议细节时，使用 `canonical` 格式并打开 `--include-metadata`。
+
 ## Web 选择式导出
 
 Web 界面不会再默认导出整个数据库。用户必须先在“调用列表”中选择记录，然后进入“数据导出”检查并导出这批记录。

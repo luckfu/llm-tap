@@ -206,6 +206,12 @@ Anthropic 协议的 `thinking` block（含 `signature`）、`tool_use` block、`
 
 完整的导出原理、处理方法、滑窗策略和参数说明见 [训练数据导出设计](docs/dataset-export.md)。
 
+### 按协议归一化
+
+- OpenAI Responses 的字符串 `input` 会导出为一条 user 消息；结构化 input 数组中的 message、reasoning、tool call 和 tool result 也会继续保留。
+- Anthropic 的 content block 不再被简单压平成文本：`text`、`thinking`/`redacted_thinking`（含 signature）、`tool_use` 和 `tool_result` 会分别保留在 canonical 消息中。导出为 OpenAI 或 `tool_sft` 时，会继续编译成 `assistant.tool_calls` 和 `role=tool` 消息。
+- 只有工具调用、没有可见文本的 assistant 回合仍然是有效 assistant 输出，不会被默认质量过滤误跳过。
+
 ### 如何选择导出格式
 
 | 格式 | 适用情况 |

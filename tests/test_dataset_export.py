@@ -2,6 +2,8 @@ import unittest
 
 from export_harness_dataset import (
     constrained_format_from_episode,
+    convert_anthropic_messages,
+    convert_openai_responses,
     estimate_context_item_units,
     estimate_openai_messages_units,
     openai_from_episode,
@@ -10,6 +12,73 @@ from export_harness_dataset import (
 
 
 class OpenAIExportTests(unittest.TestCase):
+    def _source_row(self, protocol):
+        return {
+            "call_id": "call-test",
+            "protocol": protocol,
+            "upstream_provider": "provider",
+            "upstream_model": "model",
+            "started_at": "2026-01-01T00:00:00",
+            "finished_at": "2026-01-01T00:00:01",
+            "upstream_status": 200,
+            "stop_reason": "end_turn",
+        }
+
+    def test_responses_string_input_is_preserved(self):
+        episode = convert_openai_responses(
+            self._source_row("openai-responses"),
+            {
+                "request": {"input": "Explain this code"},
+                "response": {"output": [{
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Sure"}],
+                }]},
+            },
+            "raw.json",
+        )
+        self.assertEqual(episode["messages"][0]["role"], "user")
+        self.assertEqual(episode["messages"][0]["content"], "Explain this code")
+
+    def test_anthropic_content_blocks_preserve_thinking_and_tools(self):
+        episode = convert_anthropic_messages(
+            self._source_row("anthropic-messages"),
+            {
+                "request": {"messages": [{
+                    "role": "user",
+                    "content": [{"type": "text", "text": "Look this up"}],
+                }, {
+                    "role": "user",
+                    "content": [{"type": "tool_result", "tool_use_id": "old-tool", "content": "old result"}],
+                }]},
+                "response": {"content": [
+                    {"type": "thinking", "thinking": "Need a lookup", "signature": "sig"},
+                    {"type": "redacted_thinking", "data": "opaque"},
+                    {"type": "tool_use", "id": "tool-1", "name": "lookup", "input": {"q": "x"}},
+                ]},
+            },
+            "raw.json",
+        )
+        self.assertEqual(
+            [message["type"] for message in episode["messages"]],
+            ["message", "tool_result", "reasoning", "reasoning", "tool_call"],
+        )
+        self.assertEqual(episode["messages"][2]["signature"], "sig")
+        self.assertTrue(episode["messages"][3]["redacted"])
+        self.assertEqual(episode["messages"][3]["summary"], "opaque")
+        self.assertEqual(
+            episode["messages"][4]["tool_calls"][0]["function"]["arguments"],
+            {"q": "x"},
+        )
+        openai_item = openai_from_episode(episode)
+        self.assertIsNotNone(openai_item)
+        self.assertEqual(
+            openai_item["messages"][-1]["tool_calls"][0]["function"]["name"],
+            "lookup",
+        )
+        self.assertEqual(openai_item["messages"][1]["tool_call_id"], "old-tool")
+        self.assertFalse(episode["quality"]["skip"])
+
     def _tool_episode(self):
         return {
             "id": "episode-tools",

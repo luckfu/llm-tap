@@ -334,9 +334,27 @@ def convert_openai_responses(row: Dict[str, Any], raw: Dict[str, Any], raw_path:
             "source": "request.instructions",
         })
 
-    for item in request.get("input") or []:
-        if isinstance(item, dict):
-            messages.append(normalize_responses_item(item, source="request.input"))
+    input_value = request.get("input")
+    if isinstance(input_value, str):
+        messages.append({
+            "type": "message",
+            "role": "user",
+            "content": input_value,
+            "source": "request.input",
+        })
+    elif isinstance(input_value, dict):
+        messages.append(normalize_responses_item(input_value, source="request.input"))
+    elif isinstance(input_value, list):
+        for item in input_value:
+            if isinstance(item, str):
+                messages.append({
+                    "type": "message",
+                    "role": "user",
+                    "content": item,
+                    "source": "request.input",
+                })
+            elif isinstance(item, dict):
+                messages.append(normalize_responses_item(item, source="request.input"))
 
     for item in response.get("output") or []:
         if isinstance(item, dict):
@@ -355,24 +373,104 @@ def convert_anthropic_messages(row: Dict[str, Any], raw: Dict[str, Any], raw_pat
         messages.append({"type": "message", "role": "system", "content": text_from_content_parts(system)})
 
     for message in request.get("messages") or []:
-        if not isinstance(message, dict):
-            continue
-        messages.append({
-            "type": "message",
-            "role": message.get("role") or "user",
-            "content": text_from_content_parts(message.get("content")),
-            "raw": message,
-        })
+        if isinstance(message, dict):
+            messages.extend(normalize_anthropic_message(message, source="request.messages"))
 
     if response.get("content"):
-        messages.append({
-            "type": "message",
-            "role": "assistant",
-            "content": text_from_content_parts(response.get("content")),
-            "raw": response,
-        })
+        messages.extend(normalize_anthropic_message(
+            {"role": "assistant", "content": response.get("content")},
+            source="response.content",
+            raw_message=response,
+        ))
 
     return build_episode(row, raw, raw_path, messages, request, response)
+
+
+def normalize_anthropic_message(
+    message: Dict[str, Any],
+    *,
+    source: str,
+    raw_message: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
+    """Convert Anthropic content blocks without dropping tool or thinking data."""
+    role = message.get("role") or "user"
+    raw = raw_message if raw_message is not None else message
+    content = message.get("content")
+    if isinstance(content, str):
+        return [{"type": "message", "role": role, "content": content, "raw": raw}]
+    if not isinstance(content, list):
+        text = text_from_content_parts(content)
+        return [{"type": "message", "role": role, "content": text, "raw": raw}] if text else []
+
+    normalized: List[Dict[str, Any]] = []
+    text_parts: List[str] = []
+
+    def flush_text() -> None:
+        if text_parts:
+            normalized.append({
+                "type": "message",
+                "role": role,
+                "content": "\n".join(text_parts),
+                "source": source,
+                "raw": raw,
+            })
+            text_parts.clear()
+
+    for block in content:
+        if isinstance(block, str):
+            text_parts.append(block)
+            continue
+        if not isinstance(block, dict):
+            continue
+        block_type = block.get("type")
+        if block_type == "text":
+            if block.get("text") is not None:
+                text_parts.append(str(block.get("text")))
+        elif block_type in {"thinking", "redacted_thinking"}:
+            flush_text()
+            summary = block.get("thinking") or block.get("data") or block.get("text")
+            reasoning: Dict[str, Any] = {
+                "type": "reasoning",
+                "role": "assistant",
+                "summary": summary,
+                "signature": block.get("signature"),
+                "source": source,
+                "raw": block,
+            }
+            if block_type == "redacted_thinking":
+                reasoning["redacted"] = True
+            normalized.append(reasoning)
+        elif block_type == "tool_use":
+            flush_text()
+            normalized.append({
+                "type": "tool_call",
+                "role": "assistant",
+                "source": source,
+                "tool_calls": [{
+                    "id": block.get("id"),
+                    "type": "function",
+                    "function": {
+                        "name": block.get("name"),
+                        "arguments": block.get("input") or {},
+                    },
+                }],
+                "raw": block,
+            })
+        elif block_type == "tool_result":
+            flush_text()
+            normalized.append({
+                "type": "tool_result",
+                "role": "tool",
+                "tool_call_id": block.get("tool_use_id"),
+                "content": text_from_content_parts(block.get("content")),
+                "source": source,
+                "raw": block,
+            })
+        elif block.get("text") is not None:
+            text_parts.append(str(block.get("text")))
+
+    flush_text()
+    return normalized
 
 
 def build_episode(
@@ -387,7 +485,10 @@ def build_episode(
     call_id = row.get("call_id")
     tool_call_count = sum(len(m.get("tool_calls") or []) for m in messages)
     tool_result_count = sum(1 for m in messages if m.get("type") == "tool_result" or m.get("role") == "tool")
-    assistant_messages = sum(1 for m in messages if m.get("role") == "assistant" and m.get("type") == "message")
+    assistant_messages = sum(
+        1 for m in messages
+        if m.get("role") == "assistant" and m.get("type") in {"message", "tool_call"}
+    )
 
     return {
         "schema": "llm-tap.harness_trajectory.v1",
