@@ -504,11 +504,15 @@ class ProxyServer:
             session = self.session
             if session is None:
                 return web.Response(status=503, text=json.dumps({"error": "proxy session is not ready"}))
-            timeout = aiohttp.ClientTimeout(total=300, connect=30, sock_connect=30, sock_read=600)
+            request_timeout = float(self.config.get("upstream_timeout", 300))
+            stream_read_timeout = float(self.config.get("upstream_stream_read_timeout", 600))
+            normal_timeout = aiohttp.ClientTimeout(
+                total=request_timeout, connect=30, sock_connect=30, sock_read=stream_read_timeout
+            )
 
             # GET 请求（如 /v1/models 模型列表）：纯透传，不保存
             if method == "GET":
-                async with session.get(upstream_url, headers=upstream_headers, timeout=timeout) as resp:
+                async with session.get(upstream_url, headers=upstream_headers, timeout=normal_timeout) as resp:
                     await self.async_logger.info(f"   GET response: {resp.status}")
                     return await self._relay_response(request, resp)
 
@@ -524,6 +528,10 @@ class ProxyServer:
                 request_data = {}
             model_id = request_data.get("model", "unknown")
             is_stream = request_data.get("stream", False)
+            timeout = (
+                aiohttp.ClientTimeout(total=None, connect=30, sock_connect=30, sock_read=stream_read_timeout)
+                if is_stream else normal_timeout
+            )
 
             raw_request_body = request_body
             agent_meta = extract_agent_metadata(request.headers)
@@ -601,6 +609,7 @@ class ProxyServer:
         skip_headers = {
             "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
             "te", "trailer", "transfer-encoding", "upgrade", "content-length",
+            "content-encoding",
         }
         return {k: v for k, v in resp.headers.items() if k.lower() not in skip_headers}
 
@@ -645,6 +654,8 @@ class ProxyServer:
 
         merger = None
         completed_response = None
+        response_event_name = None
+        last_event_type = None
         captured_stream_bytes = 0
         stream_capture_truncated = False
 
@@ -663,6 +674,9 @@ class ProxyServer:
                         break
                     line_bytes = line
                     line_str = line.decode("utf-8", errors="replace")
+
+                    if line_str.startswith("event:"):
+                        response_event_name = line_str[6:].strip() or None
 
                     await response.write(line_bytes)
 
@@ -683,8 +697,10 @@ class ProxyServer:
                         elif protocol == "openai-responses" and line_str.startswith("data:"):
                             try:
                                 event_data = json.loads(line_str[5:].strip())
-                                if event_data.get("type") == "response.completed":
-                                    completed_response = event_data.get("response")
+                                event_type = event_data.get("type") or response_event_name
+                                last_event_type = event_type
+                                if event_type == "response.completed":
+                                    completed_response = event_data.get("response") or event_data
                             except json.JSONDecodeError:
                                 pass
 
@@ -693,6 +709,8 @@ class ProxyServer:
                         break
                     if '"type":"message_stop"' in line_str or '"type": "message_stop"' in line_str:
                         break
+                    if not line_str.strip():
+                        response_event_name = None
                 except Exception as e:
                     await self.async_logger.error(f"Stream processing error: {e}")
                     continue
@@ -703,7 +721,9 @@ class ProxyServer:
             if not should_persist_stream_response(protocol, completed_response):
                 await self.async_logger.warning(
                     f"Skip saving incomplete Responses stream: {call_id}, "
-                    "no response.completed captured"
+                    f"no response.completed captured (last_event={last_event_type!r}, "
+                    f"event={response_event_name!r}, bytes={captured_stream_bytes}, "
+                    f"client_closed={request.transport is None or request.transport.is_closing()})"
                 )
                 return response
 

@@ -386,6 +386,8 @@ To accept LAN or other non-loopback connections, only an upstream allowlist is r
   "upstream_conn_limit_per_host": 0,
   "upstream_dns_cache_ttl": 300,
   "upstream_keepalive_timeout": 30,
+  "upstream_timeout": 300,
+  "upstream_stream_read_timeout": 600,
   "save_queue_max": 1000,
   "save_batch_size": 20,
   "capture_max_bytes": 67108864,
