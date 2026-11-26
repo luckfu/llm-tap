@@ -465,6 +465,7 @@ class ProxyServer:
             await self.runner.cleanup()
             self.runner = None
             await self.async_logger.info(f"Transparent proxy stopped on port {self.port}")
+            self.async_logger.close()
 
     # ========== 核心路由：catch-all 透明转发 ==========
 
@@ -2920,12 +2921,14 @@ async def main():
     logging.getLogger().setLevel(getattr(logging, a.log_level.upper()))
     server = ProxyServer(a.config, a.port, log_level=a.log_level, bind=a.bind)
     _register_routes(server)
-    await server.start()
     try:
+        await server.start()
         while True:
             await asyncio.sleep(3600)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, asyncio.CancelledError):
         logger.info("Server shutting down...")
+    finally:
+        await server.stop()
     return server
 
 
