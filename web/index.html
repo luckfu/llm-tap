@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light">
+<title>llm-tap · 数据采集管理</title>
+<link rel="icon" type="image/svg+xml" href='data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"%3E%3Cdefs%3E%3ClinearGradient id="g" x1="0" y1="0" x2="0" y2="1"%3E%3Cstop offset="0" stop-color="%23a0e1f0"/%3E%3Cstop offset="1" stop-color="%231e7daa"/%3E%3C/linearGradient%3E%3C/defs%3E%3Cpath fill="url(%23g)" d="M32 5C24 17 15 27 15 40c0 10 8 18 17 18s17-8 17-18C49 27 40 17 32 5z"/%3E%3Cellipse cx="26" cy="34" rx="6" ry="9" fill="white" opacity=".35" transform="rotate(24 26 34)"/%3E%3C/svg%3E'>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<header class="navbar">
+  <div class="navbar-inner">
+    <div class="brand">
+      <div class="brand-mark" aria-hidden="true">LT</div>
+      <div class="brand-copy">
+        <strong>llm-tap</strong>
+        <span data-i18n="brandProduct">Capture Console</span>
+      </div>
+    </div>
+    <nav class="nav-tabs" aria-label="Primary navigation">
+      <button type="button" id="tab-list" class="nav-tab active" onclick="switchTab('list')" data-i18n="tabList">调用列表</button>
+      <button type="button" id="tab-stats" class="nav-tab" onclick="switchTab('stats')" data-i18n="tabStats">统计概览</button>
+      <button type="button" id="tab-export" class="nav-tab" onclick="switchTab('export')" data-i18n="tabExport">数据导出</button>
+      <button type="button" id="tab-logs" class="nav-tab" onclick="switchTab('logs')" data-i18n="tabLogs">运行日志</button>
+    </nav>
+    <div class="navbar-actions">
+      <span class="capture-state" data-i18n="captureActive">本地采集中</span>
+      <div class="lang-switch" aria-label="Language">
+        <button type="button" id="lang-zh" onclick="setLang('zh')">中</button>
+        <button type="button" id="lang-en" class="active" onclick="setLang('en')">EN</button>
+      </div>
+    </div>
+  </div>
+</header>
+
+<main class="container">
+  <section id="view-list">
+    <div class="view-header">
+      <div class="view-heading">
+        <span class="eyebrow" data-i18n="callsEyebrow">Capture ledger</span>
+        <h1 data-i18n="callsTitle">调用记录</h1>
+      </div>
+      <button type="button" id="calls-refresh" class="icon-btn" onclick="refreshCallsView()" data-i18n-title="refresh" title="刷新" aria-label="刷新">↻</button>
+    </div>
+    <div class="filters">
+      <select id="f-host" onchange="applyCallFilters()">
+        <option value="" data-i18n="allHosts">全部 Host</option>
+      </select>
+      <select id="f-protocol" onchange="applyCallFilters()">
+        <option value="" data-i18n="allProtocols">全部协议</option>
+        <option value="openai-chat">OpenAI Chat</option>
+        <option value="anthropic-messages">Anthropic Messages</option>
+        <option value="openai-responses">OpenAI Responses</option>
+        <option value="embeddings">Embeddings</option>
+        <option value="rerank">Rerank</option>
+      </select>
+      <select id="f-model" onchange="applyCallFilters()">
+        <option value="" data-i18n="allModels">全部模型</option>
+      </select>
+      <select id="f-status" onchange="applyCallFilters()">
+        <option value="" data-i18n="allStatus">全部状态</option>
+        <option value="success" data-i18n="success">成功</option>
+        <option value="error" data-i18n="error">失败</option>
+      </select>
+      <button onclick="applyCallFilters()" data-i18n="search">查询</button>
+      <div class="time-range">
+        <div class="time-field"><label for="f-start-time" data-i18n="startTime">开始时间</label><input id="f-start-time" type="datetime-local" step="60" onchange="applyCallFilters()"></div>
+        <div class="time-field"><label for="f-end-time" data-i18n="endTime">结束时间</label><input id="f-end-time" type="datetime-local" step="60" onchange="applyCallFilters()"></div>
+        <button type="button" class="time-clear-btn" onclick="clearTimeRange()" data-i18n-title="clearTimeRange" title="清除时间范围" aria-label="清除时间范围">×</button>
+      </div>
+    </div>
+    <div class="selection-toolbar">
+      <div class="selection-count"><strong id="selected-count">0</strong> <span data-i18n="recordsSelected">条记录已选择</span></div>
+      <button type="button" id="select-page-btn" onclick="selectCurrentPage()" data-i18n="selectPage">选择当前页</button>
+      <button type="button" id="select-filtered-btn" onclick="selectFilteredCalls()" data-i18n="selectFiltered">选择全部筛选结果</button>
+      <button type="button" id="clear-selection-btn" onclick="clearSelection()" data-i18n="clearSelection" disabled>清空</button>
+      <button type="button" id="delete-selected-btn" class="danger-btn" onclick="deleteSelectedCalls()" data-i18n="deleteSelected" disabled>删除所选</button>
+      <button type="button" id="export-selected-btn" class="selection-primary" onclick="openSelectedExport()" data-i18n="exportSelected" disabled>导出所选</button>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th class="select-cell"><input id="select-page-checkbox" type="checkbox" onchange="toggleCurrentPage(this.checked)" data-i18n-title="selectPage" aria-label="Select current page"></th>
+            <th data-i18n="colTime">时间</th><th>Host</th><th data-i18n="colProtocol">协议</th><th data-i18n="colModel">模型</th>
+            <th data-i18n="colStatus">状态</th><th data-i18n="colDuration">耗时</th><th data-i18n="colFirstToken">首Token</th><th data-i18n="colStream">流式</th>
+            <th class="action-cell" data-i18n="colActions">操作</th>
+          </tr>
+        </thead>
+        <tbody id="calls-tbody"></tbody>
+      </table>
+    </div>
+    <div class="pagination">
+      <span id="page-info"></span>
+      <div>
+        <button id="btn-prev" onclick="changePage(-1)" data-i18n="prevPage">上一页</button>
+        <button id="btn-next" onclick="changePage(1)" data-i18n="nextPage">下一页</button>
+      </div>
+    </div>
+  </section>
+
+  <section id="view-logs" style="display:none">
+    <div class="view-header">
+      <div class="view-heading">
+        <span class="eyebrow" data-i18n="logsEyebrow">Diagnostics</span>
+        <h1 data-i18n="logsTitle">运行日志</h1>
+      </div>
+      <button type="button" id="logs-refresh" class="icon-btn" onclick="loadLogs()" data-i18n-title="refresh" title="刷新" aria-label="刷新">↻</button>
+    </div>
+    <div class="log-toolbar">
+      <span id="log-path" class="log-path"></span>
+      <label for="log-limit" data-i18n="logLines">行数</label>
+      <select id="log-limit" onchange="loadLogs()"><option value="200">200</option><option value="500" selected>500</option><option value="1000">1000</option><option value="5000">5000</option></select>
+      <button type="button" class="danger-btn" onclick="clearLogs()" data-i18n="clearLogs">清除日志</button>
+    </div>
+    <pre id="log-viewer" class="log-viewer" data-i18n="loading">加载中...</pre>
+  </section>
+
+  <section id="view-stats" style="display:none">
+    <div class="view-header">
+      <div class="view-heading">
+        <span class="eyebrow" data-i18n="statsEyebrow">Operations</span>
+        <h1 data-i18n="statsTitle">运行概览</h1>
+      </div>
+      <button type="button" id="stats-refresh" class="icon-btn" onclick="loadStats()" data-i18n-title="refresh" title="刷新" aria-label="刷新">↻</button>
+    </div>
+    <div id="stats-overview" class="stats-grid"></div>
+    <div class="stats-layout">
+      <section class="section-block">
+        <h2 class="section-heading" data-i18n="statsByHost">按 Host 统计</h2>
+        <div class="table-wrap"><table><thead><tr><th>Host</th><th data-i18n="colCount">调用数</th><th data-i18n="success">成功</th><th data-i18n="colAvgDuration">平均耗时(ms)</th></tr></thead><tbody id="stats-host"></tbody></table></div>
+      </section>
+      <div class="stats-side">
+        <section class="section-block">
+          <h2 class="section-heading" data-i18n="statsByProtocol">按协议统计</h2>
+          <div class="table-wrap"><table><thead><tr><th data-i18n="colProtocol">协议</th><th data-i18n="colCount">调用数</th></tr></thead><tbody id="stats-protocol"></tbody></table></div>
+        </section>
+        <section class="section-block">
+          <h2 class="section-heading" data-i18n="statsByModel">按模型统计</h2>
+          <div class="table-wrap"><table><thead><tr><th data-i18n="colModel">模型</th><th data-i18n="colCount">调用数</th></tr></thead><tbody id="stats-model"></tbody></table></div>
+        </section>
+      </div>
+    </div>
+  </section>
+
+  <section id="view-export" style="display:none">
+    <div class="view-header">
+      <div class="view-heading">
+        <span class="eyebrow" data-i18n="exportEyebrow">Dataset workspace</span>
+        <h1 data-i18n="exportTitle">训练数据导出</h1>
+      </div>
+      <button type="button" id="export-refresh" class="icon-btn" onclick="refreshExportView()" data-i18n-title="refresh" title="刷新" aria-label="刷新">↻</button>
+    </div>
+    <div class="export-layout">
+      <section class="panel">
+        <div class="panel-heading"><h2 data-i18n="exportSettings">导出设置</h2></div>
+        <div id="selection-scope" class="selection-scope is-empty">
+          <div><strong id="selection-scope-title"></strong><span id="selection-scope-note"></span></div>
+          <button type="button" onclick="switchTab('list')" data-i18n="changeSelection">修改选择</button>
+        </div>
+        <div class="form-field">
+          <div class="field-label">
+            <label for="export-format" data-i18n="exportFormat">数据格式</label>
+            <button type="button" class="hint-trigger" data-hint="exportFormatHint" aria-expanded="false">i</button>
+          </div>
+          <select id="export-format" onchange="updateExportFields()">
+            <option value="canonical">Canonical JSONL</option>
+            <option value="tool_sft">Tool SFT JSONL</option>
+            <option value="openai">OpenAI Messages JSONL</option>
+            <option value="sharegpt">ShareGPT JSON</option>
+          </select>
+          <div id="format-description" class="field-help" style="margin-top:7px"></div>
+        </div>
+        <div class="check-row">
+          <input id="export-metadata" type="checkbox">
+          <div class="option-label"><label for="export-metadata" data-i18n="includeMetadata">包含溯源元数据</label><button type="button" class="hint-trigger" data-hint="includeMetadataHint" aria-expanded="false">i</button></div>
+        </div>
+        <div class="check-row">
+          <input id="export-skipped" type="checkbox">
+          <div class="option-label"><label for="export-skipped" data-i18n="includeSkipped">包含低质量样本</label><button type="button" class="hint-trigger" data-hint="includeSkippedHint" aria-expanded="false">i</button></div>
+        </div>
+        <div id="sharegpt-tools-row" class="check-row" style="display:none">
+          <input id="export-tools" type="checkbox" checked>
+          <div class="option-label"><label for="export-tools" data-i18n="includeTools">注入工具定义</label><button type="button" class="hint-trigger" data-hint="includeToolsHint" aria-expanded="false">i</button></div>
+        </div>
+        <div class="check-row switch-row">
+          <div class="option-label"><label for="export-context-limit" data-i18n="enableContextLimit">限制每条记录上下文</label><button type="button" class="hint-trigger" data-hint="contextLimitHint" aria-expanded="false">i</button></div>
+          <input id="export-context-limit" type="checkbox" onchange="updateExportFields()">
+        </div>
+        <div id="window-options" style="display:none">
+          <div class="constraint-panel">
+            <div class="constraint-header">
+              <strong data-i18n="contextConstraint">单条记录上下文约束</strong>
+              <button id="use-recommended-btn" type="button" class="compact-btn" onclick="useRecommendedBudget()" data-i18n="useRecommended" disabled>使用最大目标预算</button>
+            </div>
+            <div id="context-limit-status" class="constraint-status"></div>
+            <div class="form-field">
+              <div class="field-label"><label for="export-max-seq" data-i18n="maxSeqLen">每条记录最大估算 Token</label><button type="button" class="hint-trigger" data-hint="maxSeqLenHint" aria-expanded="false">i</button></div>
+              <input id="export-max-seq" type="number" min="128" max="1000000" value="4096" oninput="updateContextConstraintStatus()">
+            </div>
+            <div class="form-field">
+              <div class="field-label"><label for="export-chars-token" data-i18n="charsPerToken">字符 / Token</label><button type="button" class="hint-trigger" data-hint="charsPerTokenHint" aria-expanded="false">i</button></div>
+              <input id="export-chars-token" type="number" min="0.1" max="100" step="0.1" value="4.0" oninput="updateContextConstraintStatus()">
+            </div>
+            <div class="form-field" style="margin-bottom:0">
+              <div class="field-label"><label for="export-prefix-ratio" data-i18n="prefixRatio">固定前缀最多占比</label><button type="button" class="hint-trigger" data-hint="prefixRatioHint" aria-expanded="false">i</button></div>
+              <input id="export-prefix-ratio" type="number" min="0" max="1" step="0.05" value="0.45">
+            </div>
+          </div>
+        </div>
+        <div class="export-actions">
+          <button id="inspect-btn" class="secondary-btn" onclick="loadExportInspect(true)" data-i18n="inspectData">检查数据</button>
+          <button id="export-btn" class="primary-btn" onclick="createExport()" data-i18n="startExport">开始导出</button>
+        </div>
+        <div id="export-status" class="status-box"></div>
+      </section>
+
+      <div class="export-side">
+        <section class="panel">
+          <div class="panel-heading"><h2 data-i18n="datasetOverview">数据概况</h2></div>
+          <div id="export-summary" class="export-summary"></div>
+          <div id="window-budget-note" class="export-note"></div>
+        </section>
+        <section class="panel">
+          <div class="panel-heading"><h2 data-i18n="generatedFiles">最近生成</h2></div>
+          <div class="table-wrap exports-table-wrap">
+            <table class="exports-table">
+              <thead><tr><th data-i18n="fileName">文件</th><th data-i18n="fileSize">大小</th><th data-i18n="createdTime">生成时间</th><th data-i18n="download">下载</th></tr></thead>
+              <tbody id="exports-tbody"></tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+    </div>
+  </section>
+</main>
+
+<div class="modal-overlay" id="modal" aria-hidden="true" onclick="if(event.target===this)closeModal()">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+    <div class="modal-header">
+      <div class="modal-title-group">
+        <h2 id="modal-title" data-i18n="callDetail">调用详情</h2>
+        <button id="modal-delete-btn" class="danger-btn" onclick="deleteCall(event, currentDetailCallId, true)" data-i18n="delete">删除</button>
+      </div>
+      <button type="button" class="modal-close" onclick="closeModal()" data-i18n-title="close" title="关闭" aria-label="关闭">&times;</button>
+    </div>
+    <div class="modal-body" id="modal-body"></div>
+  </div>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
