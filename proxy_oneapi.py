@@ -293,22 +293,32 @@ def _call_filter_clause(query) -> tuple[list[str], list[Any]]:
 
 
 class SafeUpstreamResolver(aiohttp.abc.AbstractResolver):
-    """Block DNS names that unexpectedly resolve to non-public addresses."""
+    """Block unexpected private DNS results unless explicitly allowed."""
 
-    def __init__(self, allowlist: list, delegate=None):
+    def __init__(self, allowlist: list, delegate=None, fake_ip_ranges: Optional[list] = None):
         self.allowlist = allowlist
         self.delegate = delegate or DefaultResolver()
+        self.fake_ip_ranges = tuple(fake_ip_ranges or [])
 
     async def resolve(self, host: str, port: int = 0,
                       family: socket.AddressFamily = socket.AF_INET) -> list:
         results = await self.delegate.resolve(host, port, family)
+        try:
+            ipaddress.ip_address(host)
+        except ValueError:
+            is_hostname = True
+        else:
+            is_hostname = False
         if not upstream_host_matches_allowlist(host, self.allowlist):
             for result in results:
                 try:
                     address = ipaddress.ip_address(result["host"])
                 except ValueError as exc:
                     raise OSError(f"invalid DNS result for upstream host {host!r}") from exc
-                if not address.is_global:
+                is_fake_ip = is_hostname and any(
+                    address in network for network in self.fake_ip_ranges
+                )
+                if not address.is_global and not is_fake_ip:
                     raise OSError(f"upstream host {host!r} resolves to a non-public address")
         return results
 
@@ -401,6 +411,17 @@ class ProxyServer:
         if self.request_max_bytes <= 0:
             raise ValueError("request_max_bytes must be greater than zero")
         self.upstream_allowlist = list(self.config.get("upstream_allowlist") or [])
+        raw_fake_ip_ranges = self.config.get("upstream_fake_ip_ranges") or []
+        if not isinstance(raw_fake_ip_ranges, list):
+            raise ValueError("upstream_fake_ip_ranges must be a list of CIDR networks")
+        try:
+            self.upstream_fake_ip_ranges = [
+                ipaddress.ip_network(str(value), strict=False) for value in raw_fake_ip_ranges
+            ]
+        except ValueError as exc:
+            raise ValueError(
+                "upstream_fake_ip_ranges must contain valid CIDR networks"
+            ) from exc
         # 转发通道默认不设 token：上游真实凭证由客户端自带，蹭转发不会消耗本机费用。
         # 仅当绑定到非回环地址时，要求 upstream_allowlist 以避免本机被当作任意站点的开放跳板。
         # 需要限制谁能转发时，可在 config.json 额外配置 proxy_tokens（可选）。
@@ -431,7 +452,10 @@ class ProxyServer:
         await self.async_logger.info("Database initialized")
         # Reuse a single ClientSession for all upstream requests so connections
         # are pooled and DNS/TCP handshakes aren't repeated per request.
-        resolver = SafeUpstreamResolver(self.upstream_allowlist)
+        resolver = SafeUpstreamResolver(
+            self.upstream_allowlist,
+            fake_ip_ranges=self.upstream_fake_ip_ranges,
+        )
         connector = aiohttp.TCPConnector(
             resolver=resolver,
             limit=int(self.config.get("upstream_conn_limit", 1000)),
