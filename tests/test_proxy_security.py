@@ -1,3 +1,4 @@
+import ipaddress
 import json
 import os
 import socket
@@ -115,6 +116,38 @@ class ResolverTests(unittest.IsolatedAsyncioTestCase):
         result = await resolver.resolve("example.com", 443)
         self.assertEqual(result[0]["host"], "93.184.216.34")
 
+    async def test_fake_ip_requires_explicit_configuration(self):
+        resolver = SafeUpstreamResolver([], delegate=self.Resolver("198.18.0.48"))
+        with self.assertRaisesRegex(OSError, "non-public"):
+            await resolver.resolve("api.deepseek.com", 443)
+
+    async def test_configured_fake_ip_range_allows_hostname_resolution(self):
+        resolver = SafeUpstreamResolver(
+            [],
+            delegate=self.Resolver("198.18.0.48"),
+            fake_ip_ranges=[ipaddress.ip_network("198.18.0.0/15")],
+        )
+        result = await resolver.resolve("api.deepseek.com", 443)
+        self.assertEqual(result[0]["host"], "198.18.0.48")
+
+    async def test_unrelated_fake_ip_range_remains_blocked(self):
+        resolver = SafeUpstreamResolver(
+            [],
+            delegate=self.Resolver("198.18.0.48"),
+            fake_ip_ranges=[ipaddress.ip_network("28.0.0.0/8")],
+        )
+        with self.assertRaisesRegex(OSError, "non-public"):
+            await resolver.resolve("api.deepseek.com", 443)
+
+    async def test_fake_ip_range_does_not_allow_literal_ip_destination(self):
+        resolver = SafeUpstreamResolver(
+            [],
+            delegate=self.Resolver("198.18.0.48"),
+            fake_ip_ranges=[ipaddress.ip_network("198.18.0.0/15")],
+        )
+        with self.assertRaisesRegex(OSError, "non-public"):
+            await resolver.resolve("198.18.0.48", 443)
+
 
 class BindPolicyTests(unittest.TestCase):
     def _config_file(self, config):
@@ -147,6 +180,23 @@ class BindPolicyTests(unittest.TestCase):
             "upstream_allowlist": ["api.openai.com"],
         }), bind="0.0.0.0")
         self.assertEqual(server.bind, "0.0.0.0")
+
+    def test_fake_ip_ranges_are_optional_and_validated(self):
+        server = ProxyServer(self._config_file({}))
+        self.assertEqual(server.upstream_fake_ip_ranges, [])
+
+        server = ProxyServer(self._config_file({
+            "upstream_fake_ip_ranges": ["198.18.0.1/16"],
+        }))
+        self.assertEqual(
+            [str(network) for network in server.upstream_fake_ip_ranges],
+            ["198.18.0.0/16"],
+        )
+
+        for value in ("198.18.0.0/15", ["not-a-network"]):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "upstream_fake_ip_ranges"):
+                    ProxyServer(self._config_file({"upstream_fake_ip_ranges": value}))
 
 
 class ProxyTokenTests(unittest.TestCase):
