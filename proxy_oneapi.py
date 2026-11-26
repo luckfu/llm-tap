@@ -1818,10 +1818,22 @@ button:disabled { opacity: .5; cursor: not-allowed; transform: none; }
 .modal-close { width: 36px; height: 36px; border: 0; border-radius: 6px; color: #708087; background: transparent; font-size: 25px; line-height: 1; }
 .modal-close:hover { color: var(--ink); background: #edf1f2; }
 .modal-body { padding: 22px 24px 28px; overflow-y: auto; }
-.detail-section { margin-bottom: 12px; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; }
-.detail-section summary { padding: 12px 14px; color: #4b5a60; background: var(--surface-soft); cursor: pointer; user-select: none; font-size: 12px; font-weight: 700; text-transform: uppercase; }
+.detail-section { margin-bottom: 12px; border: 1px solid var(--line); border-radius: 7px; overflow: visible; }
+.detail-section summary { position: relative; padding: 12px 48px 12px 14px; border-radius: 7px; color: #4b5a60; background: var(--surface-soft); cursor: pointer; user-select: none; font-size: 12px; font-weight: 700; text-transform: uppercase; }
+.detail-section[open] summary { border-radius: 7px 7px 0 0; }
 .detail-section summary:hover { color: var(--accent); }
-.detail-section pre { max-width: 100%; padding: 16px; overflow-x: auto; color: #304047; background: #f7f9f8; font: 12px/1.65 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+.section-copy-btn { position: absolute; top: 50%; right: 8px; z-index: 2; width: 30px; height: 30px; padding: 0; transform: translateY(-50%); display: grid; place-items: center; border: 0; border-radius: 5px; color: #7b898f; background: transparent; }
+.section-copy-btn:hover { color: var(--accent); background: #e7efed; }
+.section-copy-btn.copied { color: var(--success); }
+.section-copy-btn svg { width: 16px; height: 16px; }
+.section-copy-btn::after { content: attr(data-tooltip); position: absolute; top: calc(100% + 8px); left: 50%; z-index: 3; padding: 5px 9px; transform: translate(-50%, -4px); border-radius: 5px; color: #fff; background: #172126; font: 11px/1.2 Inter, ui-sans-serif, sans-serif; white-space: nowrap; opacity: 0; pointer-events: none; transition: opacity .12s ease, transform .12s ease; }
+.section-copy-btn:hover::after, .section-copy-btn:focus-visible::after { transform: translate(-50%, 0); opacity: 1; }
+.detail-section pre { max-width: 100%; margin: 0; padding: 16px; overflow-x: auto; border-radius: 0 0 7px 7px; color: #304047; background: #f7f9f8; font: 12px/1.65 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+.json-key { color: #8250df; }
+.json-string { color: #08755c; }
+.json-number { color: #0550ae; }
+.json-boolean { color: #9a4d00; }
+.json-null { color: #6e7781; font-style: italic; }
 .log-toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
 .log-toolbar select { width: auto; min-width: 110px; }
 .log-toolbar .log-path { margin-right: auto; color: var(--muted); font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; overflow-wrap: anywhere; }
@@ -2156,6 +2168,7 @@ const i18n = {
     colDuration: '耗时', colFirstToken: '首Token', colStream: '流式', colActions: '操作',
     prevPage: '上一页', nextPage: '下一页',
     callDetail: '调用详情', metadata: '元数据', request: '请求', response: '响应',
+    copyJson: '复制', copied: '已复制', copyFailed: '复制失败',
     headersSanitized: 'Headers (脱敏)',
     noData: '暂无数据',
     recordsSelected: '条记录已选择', selectPage: '选择当前页', selectFiltered: '选择全部筛选结果',
@@ -2209,6 +2222,7 @@ const i18n = {
     colDuration: 'Duration', colFirstToken: 'First Token', colStream: 'Stream', colActions: 'Actions',
     prevPage: 'Prev', nextPage: 'Next',
     callDetail: 'Call Detail', metadata: 'Metadata', request: 'Request', response: 'Response',
+    copyJson: 'Copy', copied: 'Copied', copyFailed: 'Copy failed',
     headersSanitized: 'Headers (sanitized)',
     noData: 'No data',
     recordsSelected: 'records selected', selectPage: 'Select page', selectFiltered: 'Select all filtered',
@@ -2290,6 +2304,10 @@ function applyI18n() {
       el.setAttribute('aria-label', i18n[lang][key]);
     }
   });
+  document.querySelectorAll('[data-i18n-tooltip]').forEach(el => {
+    const key = el.getAttribute('data-i18n-tooltip');
+    if (i18n[lang][key]) el.dataset.tooltip = i18n[lang][key];
+  });
   document.querySelectorAll('[data-hint]').forEach(el => {
     const key = el.getAttribute('data-hint');
     const message = i18n[lang][key];
@@ -2311,6 +2329,7 @@ function closeHints(except = null) {
 let currentPage = 1;
 let total = 0;
 let currentDetailCallId = null;
+let currentDetailSections = [];
 let currentPageCallIds = [];
 const selectedCallIds = new Set();
 const pageSize = 20;
@@ -2565,20 +2584,94 @@ async function deleteCall(event, callId, closeAfterDelete = false) {
   }
 }
 
+function highlightJson(value) {
+  const json = JSON.stringify(value, null, 2);
+  if (json === undefined) return '';
+  const tokenPattern = /("(?:\\\\.|[^"\\\\])*")(\\s*:)?|\\b(true|false|null)\\b|(-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?)/g;
+  let html = '';
+  let lastIndex = 0;
+  let match;
+  while ((match = tokenPattern.exec(json)) !== null) {
+    html += esc(json.slice(lastIndex, match.index));
+    if (match[1]) {
+      const className = match[2] ? 'json-key' : 'json-string';
+      html += '<span class="' + className + '">' + esc(match[1]) + '</span>';
+      if (match[2]) html += esc(match[2]);
+    } else if (match[3]) {
+      const className = match[3] === 'null' ? 'json-null' : 'json-boolean';
+      html += '<span class="' + className + '">' + match[3] + '</span>';
+    } else {
+      html += '<span class="json-number">' + esc(match[0]) + '</span>';
+    }
+    lastIndex = tokenPattern.lastIndex;
+  }
+  return html + esc(json.slice(lastIndex));
+}
+
+const COPY_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"></rect><path d="M15 9V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h3"></path></svg>';
+const CHECK_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12l4 4L19 6"></path></svg>';
+
+async function copySectionJson(event, index) {
+  event.preventDefault();
+  event.stopPropagation();
+  const button = event.currentTarget;
+  const json = currentDetailSections[index];
+  if (json === undefined) return;
+  button.disabled = true;
+  try {
+    let copied = false;
+    if (navigator.clipboard && window.isSecureContext) {
+      try {
+        await navigator.clipboard.writeText(json);
+        copied = true;
+      } catch (_) {
+        // Fall back to a temporary textarea when clipboard permission is denied.
+      }
+    }
+    if (!copied) {
+      const textarea = document.createElement('textarea');
+      textarea.value = json;
+      textarea.style.position = 'fixed';
+      textarea.style.opacity = '0';
+      document.body.appendChild(textarea);
+      textarea.focus();
+      textarea.select();
+      copied = document.execCommand('copy');
+      textarea.remove();
+      if (!copied) throw new Error(t('copyFailed'));
+    }
+    button.classList.add('copied');
+    button.innerHTML = CHECK_ICON;
+    button.dataset.tooltip = t('copied');
+    button.setAttribute('aria-label', t('copied'));
+    clearTimeout(button._copyResetTimer);
+    button._copyResetTimer = setTimeout(() => {
+      button.classList.remove('copied');
+      button.innerHTML = COPY_ICON;
+      button.dataset.tooltip = t('copyJson');
+      button.setAttribute('aria-label', t('copyJson'));
+    }, 5000);
+  } catch (err) {
+    alert(t('copyFailed') + ': ' + ((err && err.message) ? err.message : String(err)));
+  } finally {
+    button.disabled = false;
+  }
+}
+
 async function showDetail(callId) {
   currentDetailCallId = callId;
+  currentDetailSections = [];
   document.getElementById('modal-delete-btn').disabled = false;
   const res = await fetch('/api/calls/' + callId);
   const data = await res.json();
   const call = data.call || {};
   const meta = call.meta || data.meta || {};
   document.getElementById('modal-title').textContent = t('callDetail');
-  // Escape HTML so JSON content containing <script>/<b>/etc is shown as text,
-  // not rendered as HTML. Without this, markdown/HTML inside response bodies
-  // breaks the <pre> block and messes up the modal layout.
-  function preBlock(obj) { return '<pre>' + esc(JSON.stringify(obj, null, 2)) + '</pre>'; }
+  function preBlock(obj) { return '<pre>' + highlightJson(obj) + '</pre>'; }
   function detailBlock(title, obj, open) {
-    return '<details class="detail-section"'+(open ? ' open' : '')+'><summary>'+title+'</summary>' + preBlock(obj) + '</details>';
+    const index = currentDetailSections.push(JSON.stringify(obj, null, 2)) - 1;
+    const copyLabel = esc(t('copyJson'));
+    return '<details class="detail-section"'+(open ? ' open' : '')+'><summary><span>'+esc(title)+'</span><button type="button" class="section-copy-btn" onclick="copySectionJson(event, '+index+')" data-i18n-tooltip="copyJson" data-tooltip="'+copyLabel+'" aria-label="'+copyLabel+'">'+COPY_ICON+'</button></summary>' + preBlock(obj) + '</details>';
   }
   let html = '';
   html += detailBlock(t('metadata'), meta, false);
@@ -2593,6 +2686,7 @@ async function showDetail(callId) {
 
 function closeModal() {
   currentDetailCallId = null;
+  currentDetailSections = [];
   document.getElementById('modal').classList.remove('show');
   document.getElementById('modal').setAttribute('aria-hidden', 'true');
   document.body.style.overflow = '';
