@@ -32,6 +32,7 @@ jobs:
         shell: bash
         run: |
           pyinstaller --windowed --noconfirm \
+            --add-data "web:web" \
             --name llm-tap \
             --osx-bundle-identifier com.llmtap.app \
             --hidden-import pystray._darwin \
@@ -65,6 +66,7 @@ jobs:
         shell: bash
         run: |
           pyinstaller --windowed --onefile --noconfirm \
+            --add-data "web;web" \
             --name llm-tap \
             --hidden-import pystray._win32 \
             tray_app.py
