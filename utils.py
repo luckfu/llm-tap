@@ -51,6 +51,16 @@ class AsyncLogger:
             respect_handler_level=True
         )
         self.listener.start()
+        self.closed = False
+
+    def close(self) -> None:
+        """Flush queued messages, stop the listener, and close its handlers."""
+        if self.closed:
+            return
+        self.closed = True
+        self.listener.stop()
+        for handler in self.listener.handlers:
+            handler.close()
 
     def clear_file(self) -> None:
         """Truncate the active log stream safely while the listener is running."""
@@ -84,7 +94,7 @@ def init_async_logger(name: str, log_file: str, level=logging.DEBUG) -> AsyncLog
     global _async_logger
     if _async_logger is not None:
         try:
-            _async_logger.listener.stop()
+            _async_logger.close()
         except Exception as e:
             logger.warning(f"Error stopping existing log listener: {e}")
     _async_logger = AsyncLogger(name, log_file, level)
